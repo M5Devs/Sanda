@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<meta name="color-scheme" content="dark">
+<title>Sanda — Control Center</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div>
+      <h1>Sanda</h1>
+      <p>Cloud Linux Desktop &amp; AI Coding Rig</p>
+    </div>
+  </div>
+  <button id="refresh" class="icon-btn" title="Refresh status" aria-label="Refresh status">⟳</button>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="panel-head">
+      <h2>AI coding tools</h2>
+      <span id="tool-summary" class="muted">checking…</span>
+    </div>
+    <div id="tools" class="cards">
+      <div class="skeleton">Loading tools…</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Launch</h2></div>
+    <div class="launch">
+      <a id="desktop-link" class="launch-card" href="#" target="_blank" rel="noopener">
+        <span class="launch-icon">🖥️</span>
+        <span class="launch-body">
+          <strong>Linux Desktop</strong>
+          <small>XFCE · noVNC · port 6080</small>
+        </span>
+        <span class="launch-actions">
+          <span id="desktop-state" class="pill pill-idle">checking</span>
+        </span>
+      </a>
+      <div class="launch-card">
+        <span class="launch-icon">⚡</span>
+        <span class="launch-body">
+          <strong>DeepSeek Harness</strong>
+          <small>Web UI · port 3080</small>
+        </span>
+        <span class="launch-actions">
+          <span id="dsh-state" class="pill pill-idle">checking</span>
+          <a id="dsh-link" class="btn btn-ghost" href="#" target="_blank" rel="noopener" hidden>Open</a>
+          <button id="start-dsh" class="btn btn-ghost" type="button">Start</button>
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Quick command</h2>
+      <span class="muted">no terminal needed</span>
+    </div>
+    <form id="exec-form" class="exec">
+      <input id="cmd" type="text" inputmode="text" autocomplete="off" spellcheck="false"
+             placeholder="ls -la" aria-label="Command">
+      <button class="btn" type="submit">Run</button>
+    </form>
+    <div class="chips">
+      <button class="chip" data-cmd="sanda --status">sanda --status</button>
+      <button class="chip" data-cmd="ls -la">ls -la</button>
+      <button class="chip" data-cmd="git status">git status</button>
+      <button class="chip" data-cmd="df -h">df -h</button>
+    </div>
+  </section>
+
+  <section id="log-panel" class="panel log-panel" hidden>
+    <div class="panel-head">
+      <h2 id="log-title">Output</h2>
+      <div class="log-actions">
+        <span id="log-status" class="muted"></span>
+        <button id="log-clear" class="icon-btn" type="button" title="Clear">✕</button>
+      </div>
+    </div>
+    <pre id="log" class="log" aria-live="polite"></pre>
+  </section>
+</main>
+
+<footer>
+  <p>Stop the Codespace when you are done to save your free hours.</p>
+</footer>
+
+<script src="app.js" defer></script>
+</body>
+</html>

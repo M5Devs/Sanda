@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Sanda — install AI coding agents on demand.
 #
-# Installed as /usr/local/bin/sanda by .sanda/setup.sh.
-#   sanda                  interactive checklist
+# Installed as /usr/local/bin/sanda by .sanda/setup.sh. The interactive menu is
+# a plain numbered list on purpose: mobile keyboards have no arrow keys, so you
+# type numbers instead of navigating a TUI.
+#
+#   sanda                  numbered menu
 #   sanda install dsh pi   install named tools
 #   sanda --all            install every CLI agent
 #   sanda --status         list what is installed
@@ -16,7 +19,6 @@ warn() { printf '%s WARN: %s\n' "$TAG" "$*" >&2; }
 SANDA_DIR="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 readonly SANDA_DIR
 export PATH="$HOME/.local/bin:$PATH"
-[ -n "${TERM:-}" ] || export TERM=xterm
 
 NPM=(npm)
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -129,72 +131,93 @@ install_tags() {
   done
 }
 
-CHECKLIST_ITEMS=(
-  "dsh"         "DeepSeek Harness   (dsh, web UI on :3080)"     OFF
-  "opencode"    "OpenCode           (opencode-ai)"              OFF
-  "pi"          "Pi coding agent    (@earendil-works/pi-coding-agent)" OFF
-  "codex"       "OpenAI Codex CLI   (@openai/codex)"            OFF
-  "agy"         "Antigravity CLI    (agy)"                      OFF
-  "agy-desktop" "Antigravity Desktop app  (~210 MB download)"   OFF
+TOOL_IDS=(dsh opencode pi codex agy agy-desktop)
+TOOL_BINS=(dsh opencode pi codex agy antigravity)
+TOOL_LABELS=(
+  "DeepSeek Harness      (dsh, web UI on :3080)"
+  "OpenCode              (opencode-ai)"
+  "Pi coding agent       (@earendil-works/pi-coding-agent)"
+  "OpenAI Codex CLI      (@openai/codex)"
+  "Antigravity CLI       (agy)"
+  "Antigravity Desktop   (~210 MB download)"
 )
 
-require_whiptail() {
-  if ! have whiptail; then
-    warn "whiptail is not installed. Run: sudo apt-get install -y whiptail"
-    return 1
-  fi
-}
-
-main_menu() {
-  whiptail --title "Sanda" --menu "Install AI coding tools on demand" 16 78 6 \
-    "pick"   "Pick and install tools (checklist)" \
-    "all"    "Install all CLI agents" \
-    "status" "Show installed tools" \
-    "quit"   "Exit" \
-    3>&1 1>&2 2>&3
-}
-
-pick_tools() {
-  local choices tags
-  if ! choices="$(whiptail --title "Sanda — pick your tools" \
-      --checklist "Space toggles a tool, Enter installs the selected ones." \
-      20 86 8 "${CHECKLIST_ITEMS[@]}" 3>&1 1>&2 2>&3)"; then
-    return 0
-  fi
-
-  choices="$(printf '%s' "$choices" | tr -d '"')"
-  if [ -z "$choices" ]; then
-    log "Nothing selected."
-    return 0
-  fi
-
-  read -r -a tags <<< "$choices"
-  install_tags "${tags[@]}"
-  log "Done. Run 'agents' to see what is available."
+show_menu() {
+  local i mark
+  printf '\n%s  What do you want to install?\n\n' "$TAG"
+  for i in "${!TOOL_IDS[@]}"; do
+    mark="  "
+    have "${TOOL_BINS[$i]}" && mark="✓ "
+    printf '  %s%d) %s\n' "$mark" "$((i + 1))" "${TOOL_LABELS[$i]}"
+  done
+  printf '\n  a) install all CLI agents\n'
+  printf '  s) show installed tools\n'
+  printf '  q) quit\n\n'
+  printf 'Numbers separated by spaces (e.g. 1 3), or a/s/q: '
 }
 
 show_status() {
-  local a rows=""
-  for a in dsh opencode pi codex agy; do
-    if have "$a"; then
-      rows+="$a: $(command -v "$a")"$'\n'
+  local i
+  printf '\n%s  Installed tools\n' "$TAG"
+  for i in "${!TOOL_IDS[@]}"; do
+    if have "${TOOL_BINS[$i]}"; then
+      printf '  ✓ %-11s %s\n' "${TOOL_BINS[$i]}" "$(command -v "${TOOL_BINS[$i]}")"
     else
-      rows+="$a: not installed"$'\n'
+      printf '  · %-11s not installed\n' "${TOOL_BINS[$i]}"
     fi
   done
+  printf '\n'
+}
 
-  if [ -t 1 ] && have whiptail; then
-    whiptail --title "Sanda — installed tools" --msgbox "$rows" 16 78 3>&1 1>&2 2>&3 || true
-  else
-    printf '%s' "$rows"
+run_picks() {
+  local input="$1" token
+  local -a tokens=() picked=()
+
+  read -r -a tokens <<< "$input"
+
+  for token in "${tokens[@]}"; do
+    case "$token" in
+      a|A) install_all; log "All CLI agents processed."; return 0 ;;
+      s|S) show_status; return 0 ;;
+      q|Q) exit 0 ;;
+      ''|*[!0-9]*)
+        warn "Ignoring '$token' (expected a number, a, s or q)"
+        ;;
+      *)
+        if [ "$token" -ge 1 ] && [ "$token" -le "${#TOOL_IDS[@]}" ]; then
+          picked+=("${TOOL_IDS[$((token - 1))]}")
+        else
+          warn "No tool numbered $token (valid: 1-${#TOOL_IDS[@]})"
+        fi
+        ;;
+    esac
+  done
+
+  if [ "${#picked[@]}" -eq 0 ]; then
+    return 0
   fi
+
+  install_tags "${picked[@]}"
+  log "Done. Run 'agents' to see what is available."
+}
+
+interactive() {
+  local input
+  while true; do
+    show_menu
+    if ! IFS= read -r input; then
+      printf '\n'
+      exit 0
+    fi
+    run_picks "$input"
+  done
 }
 
 usage() {
   cat <<'EOF'
 Usage: sanda [command]
 
-  sanda                 interactive menu (pick tools, install all, status)
+  sanda                 numbered menu (no arrow keys needed)
   sanda --all           install all CLI agents
   sanda --status        list installed tools
   sanda install <tool>  install named tools
@@ -202,6 +225,7 @@ Usage: sanda [command]
 Tools: dsh, opencode, pi, codex, agy, agy-desktop
 
 Agents are installed on demand so Codespace creation stays fast.
+Prefer a browser? The Sanda dashboard on port 4040 does the same thing.
 EOF
 }
 
@@ -212,19 +236,7 @@ main() {
         usage
         exit 1
       fi
-      require_whiptail || exit 1
-      while true; do
-        local action
-        if ! action="$(main_menu)"; then
-          exit 0
-        fi
-        case "$action" in
-          pick)   pick_tools ;;
-          all)    install_all; log "All CLI agents processed." ;;
-          status) show_status ;;
-          quit)   exit 0 ;;
-        esac
-      done
+      interactive
       ;;
     --all|all)
       install_all

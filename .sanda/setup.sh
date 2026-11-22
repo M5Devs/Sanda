@@ -12,6 +12,7 @@ log()  { printf '%s %s\n' "$TAG" "$*"; }
 warn() { printf '%s WARN: %s\n' "$TAG" "$*" >&2; }
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname -- "$SCRIPT_DIR")"
 export DEBIAN_FRONTEND=noninteractive
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -21,9 +22,9 @@ SUDO=()
 log "Updating apt package lists"
 "${SUDO[@]}" apt-get update -qq || warn "apt-get update failed; continuing with cached lists"
 
-log "Installing base tools: tmux htop jq whiptail ffmpeg ..."
+log "Installing base tools: tmux htop jq ffmpeg ..."
 "${SUDO[@]}" apt-get install -y -qq --no-install-recommends \
-  tmux htop jq whiptail ffmpeg curl ca-certificates unzip xdg-utils \
+  tmux htop jq ffmpeg curl ca-certificates unzip xdg-utils \
   || warn "Some base tools could not be installed"
 
 browser_works() {
@@ -72,6 +73,161 @@ install_browser() {
 
 install_browser
 
+# Dark theme and a readable terminal font. Written as config files so they also
+# apply when the session is not running yet; xfconf-query applies them live when
+# a session is reachable.
+configure_desktop_look() {
+  local cfg="$HOME/.config/xfce4"
+  mkdir -p "$cfg/xfconf/xfce-perchannel-xml" "$cfg/terminal" 2>/dev/null || return 0
+
+  local wm_theme="Default" t
+  for t in Greybird-dark Adwaita-dark; do
+    if [ -d "/usr/share/themes/$t/xfwm4" ]; then
+      wm_theme="$t"
+      break
+    fi
+  done
+
+  cat > "$cfg/xfconf/xfce-perchannel-xml/xsettings.xml" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xsettings" version="1.0">
+  <property name="Net" type="empty">
+    <property name="ThemeName" type="string" value="Adwaita-dark"/>
+    <property name="IconThemeName" type="string" value="Adwaita"/>
+  </property>
+  <property name="Xft" type="empty">
+    <property name="DPI" type="int" value="96"/>
+    <property name="Antialias" type="int" value="1"/>
+    <property name="HintStyle" type="string" value="hintslight"/>
+    <property name="RGBA" type="string" value="rgb"/>
+  </property>
+  <property name="Gtk" type="empty">
+    <property name="FontName" type="string" value="Sans 11"/>
+  </property>
+</channel>
+EOF
+
+  cat > "$cfg/xfconf/xfce-perchannel-xml/xfwm4.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="$wm_theme"/>
+    <property name="title_font" type="string" value="Sans Bold 10"/>
+    <property name="title_alignment" type="string" value="center"/>
+  </property>
+</channel>
+EOF
+
+  cat > "$cfg/terminal/terminalrc" <<'EOF'
+[Configuration]
+FontName=Monospace 13
+FontUseSystem=FALSE
+ColorForeground=#e8ebf2
+ColorBackground=#141821
+ColorCursor=#7c5cff
+ColorBold=#ffffff
+MiscDefaultGeometry=120x34
+MiscMouseWheelZoom=TRUE
+MiscAlwaysShowTabs=FALSE
+MiscSlimTabs=FALSE
+EOF
+
+  if command -v xfconf-query >/dev/null 2>&1; then
+    xfconf-query -c xsettings -p /Net/ThemeName -s Adwaita-dark >/dev/null 2>&1 || true
+    xfconf-query -c xfwm4 -p /general/theme -s "$wm_theme" >/dev/null 2>&1 || true
+  fi
+}
+
+write_launcher() {
+  local dir="$1" file="$2" name="$3" comment="$4" exec_line="$5" icon="$6"
+  cat > "$dir/$file" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=$name
+Comment=$comment
+Exec=$exec_line
+Icon=$icon
+Terminal=false
+Categories=Development;Utility;
+EOF
+  chmod +x "$dir/$file"
+}
+
+# Populate ~/Desktop so a fresh XFCE session is not an empty screen.
+create_desktop_shortcuts() {
+  local desktop bin="$HOME/.local/bin"
+  desktop="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+  [ -n "$desktop" ] || desktop="$HOME/Desktop"
+  mkdir -p "$desktop" "$bin" 2>/dev/null || return 0
+
+  cat > "$bin/sanda-open-dashboard" <<'EOF'
+#!/usr/bin/env bash
+url="http://localhost:${SANDA_WEB_PORT:-4040}"
+for opener in xdg-open exo-open; do
+  if command -v "$opener" >/dev/null 2>&1 && "$opener" "$url" >/dev/null 2>&1; then
+    exit 0
+  fi
+done
+for browser in google-chrome google-chrome-stable chromium chromium-browser firefox; do
+  if command -v "$browser" >/dev/null 2>&1; then
+    exec "$browser" --no-sandbox "$url"
+  fi
+done
+printf 'No browser found\n' >&2
+exit 1
+EOF
+
+  cat > "$bin/sanda-open-browser" <<'EOF'
+#!/usr/bin/env bash
+for browser in google-chrome google-chrome-stable chromium chromium-browser firefox; do
+  if command -v "$browser" >/dev/null 2>&1; then
+    exec "$browser" --no-sandbox "$@"
+  fi
+done
+printf 'No browser found\n' >&2
+exit 1
+EOF
+
+  cat > "$bin/sanda-open-workspace" <<'EOF'
+#!/usr/bin/env bash
+dir="@REPO_DIR@"
+if command -v thunar >/dev/null 2>&1; then
+  exec thunar "$dir"
+fi
+if command -v xfce4-terminal >/dev/null 2>&1; then
+  exec xfce4-terminal --working-directory="$dir" --maximize
+fi
+exec x-terminal-emulator
+EOF
+
+  sed -i "s|@REPO_DIR@|$REPO_DIR|g" "$bin/sanda-open-workspace"
+  chmod +x "$bin/sanda-open-dashboard" "$bin/sanda-open-browser" "$bin/sanda-open-workspace"
+
+  local chrome="" b
+  for b in google-chrome google-chrome-stable chromium chromium-browser; do
+    if command -v "$b" >/dev/null 2>&1; then
+      chrome="$b"
+      break
+    fi
+  done
+
+  write_launcher "$desktop" "sanda-dashboard.desktop" "Sanda Dashboard" \
+    "Control center for your AI coding tools" "$bin/sanda-open-dashboard" "web-browser"
+  write_launcher "$desktop" "sanda-terminal.desktop" "Sanda Terminal" \
+    "Full-size terminal" "xfce4-terminal --maximize" "utilities-terminal"
+  write_launcher "$desktop" "sanda-workspace.desktop" "Workspace" \
+    "Open the project folder" "$bin/sanda-open-workspace" "folder"
+
+  if [ -n "$chrome" ]; then
+    write_launcher "$desktop" "google-chrome.desktop" "Google Chrome" \
+      "Web browser" "$bin/sanda-open-browser" "google-chrome"
+  else
+    write_launcher "$desktop" "sanda-browser.desktop" "Web Browser" \
+      "Web browser" "$bin/sanda-open-browser" "web-browser"
+  fi
+}
+
 # desktop-lite ships only Fluxbox; upgrade the session to XFCE for a usable
 # panel and application menu on a phone screen.
 configure_desktop() {
@@ -98,6 +254,9 @@ EOF
 
   "${SUDO[@]}" update-alternatives --set x-session-manager /usr/bin/xfce4-session \
     >/dev/null 2>&1 || true
+
+  configure_desktop_look
+  create_desktop_shortcuts
 
   # The VNC session may already be up with Fluxbox. Its watchdog restarts
   # Xtigervnc within a few seconds and then picks up the new xstartup.
@@ -159,7 +318,7 @@ agents() {
 }
 
 if [ -t 1 ]; then
-  printf '\n\033[1;36mSanda\033[0m — run \033[1msanda\033[0m to pick and install your AI coding tools.\n\n'
+  printf '\n\033[1;36mSanda\033[0m — dashboard: http://localhost:4040 · run \033[1msanda\033[0m to install tools.\n\n'
 fi
 # <<< Sanda <<<
 SANDA_BASHRC
@@ -167,5 +326,6 @@ SANDA_BASHRC
 fi
 
 log "Base setup complete."
-log "Desktop: port 6080 (noVNC). Run 'sanda' to install your AI coding tools."
+log "Dashboard: port 4040 · Desktop: port 6080 (noVNC) · DeepSeek web UI: port 3080"
+log "Run 'sanda' or open the dashboard to install your AI coding tools."
 log "Stop the Codespace when you are finished to save your free monthly hours."
