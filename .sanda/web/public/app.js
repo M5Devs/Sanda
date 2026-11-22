@@ -171,15 +171,14 @@ function setNote(id, text) {
   el.hidden = !text;
 }
 
-// A 43-char password would otherwise force the card wider than the phone.
+// A 43-char secret would otherwise force the card wider than the phone.
 // <wbr> adds wrap points but contributes no text, so copy still yields the
-// exact password.
-function setPassword(password) {
-  const el = $('#opencode-password');
+// exact value.
+function setSecret(el, value) {
   el.textContent = '';
-  for (let i = 0; i < password.length; i += 8) {
+  for (let i = 0; i < value.length; i += 8) {
     if (i) el.append(document.createElement('wbr'));
-    el.append(password.slice(i, i + 8));
+    el.append(value.slice(i, i + 8));
   }
 }
 
@@ -538,10 +537,28 @@ async function refresh() {
 
     const password = status.opencode && status.opencode.password;
     if (status.running.opencode && password) {
-      setPassword(password);
+      setSecret($('#opencode-password'), password);
       $('#opencode-password-row').hidden = false;
     } else {
       $('#opencode-password-row').hidden = true;
+    }
+
+    // dsh answers 401 to any request without its per-process token, and the
+    // Codespaces first-visit redirect can drop the ?token= query. Keep the
+    // token on the card so it can be copied, or Open re-tapped.
+    const dshToken = status.dsh && status.dsh.token;
+    if (status.running.dsh && dshToken) {
+      setSecret($('#dsh-token'), dshToken);
+      $('#dsh-token-row').hidden = false;
+      setNote('dsh-note', '');
+    } else {
+      $('#dsh-token-row').hidden = true;
+      if (status.running.dsh) {
+        setNote(
+          'dsh-note',
+          'Running, but the hub found no token in /tmp/sanda-dsh-web.log. Restart it here, or open the URL dsh printed in your terminal.'
+        );
+      }
     }
   } catch {
     $('#tool-summary').textContent = 'dashboard offline';
@@ -578,22 +595,25 @@ $('#start-antigravity').addEventListener('click', startAntigravity);
 $('#antigravity-stop').addEventListener('click', () => stopService('antigravity'));
 $('#antigravity-restart').addEventListener('click', () => restartService('antigravity'));
 
-$('#opencode-copy').addEventListener('click', async () => {
-  const text = $('#opencode-password').textContent;
-  const btn = $('#opencode-copy');
+async function copySecret(valueEl, btn) {
   try {
-    await navigator.clipboard.writeText(text);
+    await navigator.clipboard.writeText(valueEl.textContent);
     btn.textContent = '✓';
     setTimeout(() => { btn.textContent = '⧉'; }, 1200);
   } catch {
     // Clipboard needs https or localhost; fall back to selecting the text.
     const range = document.createRange();
-    range.selectNodeContents($('#opencode-password'));
+    range.selectNodeContents(valueEl);
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
   }
-});
+}
+
+$('#opencode-copy').addEventListener('click', () =>
+  copySecret($('#opencode-password'), $('#opencode-copy'))
+);
+$('#dsh-copy').addEventListener('click', () => copySecret($('#dsh-token'), $('#dsh-copy')));
 
 $('#log-clear').addEventListener('click', () => {
   logEl().textContent = '';

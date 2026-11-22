@@ -303,7 +303,10 @@ dsh-web() {
   if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]; then
     extra+=(--trusted-host "${CODESPACE_NAME}-3080.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}")
   fi
-  npx -y @deepseek-ai/dsh web --port 3080 --no-open "${extra[@]}"
+  # Tee the banner: the dashboard reads the ?token= it prints, so a dsh started
+  # here still gets a working Open link on port 4040.
+  npx -y @deepseek-ai/dsh web --port 3080 --no-open "${extra[@]}" 2>&1 \
+    | tee -a /tmp/sanda-dsh-web.log
 }
 
 alias dsh-tui='npx -y @deepseek-ai/dsh tui'

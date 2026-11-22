@@ -232,7 +232,9 @@ dsh-web
 
 This starts the web UI on port `3080` and prints a URL. Open the **PORTS** tab, tap the globe icon next to **DeepSeek Harness Web UI**, and the UI opens in your phone browser. Keep the terminal running while you use it. The helper automatically trusts the Codespaces proxy host, so the UI works behind GitHub's forwarded URL.
 
-The first request needs the one-time token from that URL (`?token=…`); the hub's **Open** button appends it for you. Opening the port by hand? Copy the full URL from `/tmp/sanda-dsh-web.log`.
+The first request needs the token from that URL (`?token=…`); the hub's **Open** button appends it for you, and the card shows the token with a **copy** button in case Codespaces drops the query on its first-visit redirect. Opening the port by hand? Copy the full URL from `/tmp/sanda-dsh-web.log`.
+
+`dsh` mints a random token per process and offers no `--no-auth` or fixed `--token` flag, so the token is the only way in. The hub reads it from the log (after stripping colour escapes), checks it against the running server before showing it, and hides a stale one instead of offering a dead link. A successful visit sets a 30-day `dsh-auth-*` cookie, so later visits work without the token.
 
 ### OpenCode Web (port 4096)
 
@@ -320,6 +322,7 @@ Your files, secrets, and installed agents are kept. Starting it again takes seco
 | `sanda: command not found` | The base setup did not finish. Run `bash .sanda/setup.sh`. |
 | `pi: command not found` | Agents are on demand. Install it from the hub or `sanda`. |
 | Port `3080` shows nothing | Tap **Start** on the hub, or run `dsh-web`; check `/tmp/sanda-dsh-web.log`. |
+| `dsh web authentication required; reopen the URL printed by dsh web` | The request arrived without the token or the `dsh-auth-*` cookie. Tap **Open** on the DeepSeek Harness card (it appends `?token=…`), or copy the token from the card into the URL. If the card shows no token, **Restart** dsh from the card so the hub can read the fresh one. |
 | Port `4096` shows nothing | Tap **Start** on the OpenCode card; check `/tmp/sanda-opencode.log`. |
 | OpenCode asks for a password | Read it from the OpenCode card (copy button) or `grep -i password /tmp/sanda-opencode.log`. |
 | Chat says "not installed yet" | Install that agent in **AI coding tools** first. |

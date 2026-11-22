@@ -215,6 +215,15 @@ function detectDisplay() {
   return sockets.includes(':1') ? ':1' : sockets[0] || ':1';
 }
 
+// dsh and opencode colourise their banner when they think a terminal is
+// attached, and a colour reset can land inside a token (`token=AB\e[0mCD`).
+// Strip the escapes before parsing or the captured value is truncated.
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]|\u001b\][^\u0007]*\u0007/g;
+
+function stripAnsi(text) {
+  return text.replace(ANSI, '').replace(/\r/g, '');
+}
+
 function tailLog(file, lines) {
   try {
     return fs
@@ -229,25 +238,61 @@ function tailLog(file, lines) {
 }
 
 function opencodePassword() {
-  const text = tailLog(OPENCODE_LOG, 200);
-  const matches = [...text.matchAll(/server password\s+(\S+)/g)];
+  const matches = [...stripAnsi(tailLog(OPENCODE_LOG, 200)).matchAll(/server password\s+(\S+)/g)];
   return matches.length ? matches[matches.length - 1][1] : null;
 }
 
-// dsh prints "dsh web: http://127.0.0.1:3080/?token=..." and rejects requests
-// without it, so the Open link has to carry the token.
+// dsh prints "dsh web: http://127.0.0.1:3080/?token=..." and answers 401 to
+// every request without that token. It is random per process and no flag
+// (`--no-auth`, `--token`) or env var overrides it, so the Open link and the
+// card both carry the value parsed here.
+function dshTokens() {
+  const matches = [
+    ...stripAnsi(tailLog(DSH_LOG, 400)).matchAll(/[?&]token=([^\s"'&<>]+)/g),
+  ];
+  return matches.map((match) => {
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return match[1];
+    }
+  });
+}
+
 function dshToken() {
-  const text = tailLog(DSH_LOG, 200);
-  const matches = [...text.matchAll(/[?&]token=([A-Za-z0-9_-]+)/g)];
-  return matches.length ? matches[matches.length - 1][1] : null;
+  const tokens = dshTokens();
+  return tokens.length ? tokens[tokens.length - 1] : null;
 }
 
-// ---- process helpers ------------------------------------------------------
+// A token read from the log can belong to an earlier process (dsh started by
+// hand, or a log that was not truncated). Ask the live server: dsh answers 303
+// to the URL it printed and 401 to anything else. Newest candidate wins.
+async function verifiedDshToken() {
+  const tokens = dshTokens().reverse().slice(0, 3);
+  if (!tokens.length) return null;
+  for (const token of tokens) {
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${DSH_PORT}/?token=${encodeURIComponent(token)}`,
+        { redirect: 'manual' }
+      );
+      await res.text();
+      if (res.status === 303 || res.status === 302) return token;
+    } catch {
+      return tokens[0];
+    }
+  }
+  return null;
+}
 
-const ANSI = /\u001b\[[0-9;?]*[A-Za-z]|\u001b\][^\u0007]*\u0007/g;
-
-function stripAnsi(text) {
-  return text.replace(ANSI, '');
+// The port can answer a moment before the banner is flushed to the log.
+async function waitForDshToken(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const token = dshToken();
+    if (token || Date.now() >= deadline) return token;
+    await sleep(200);
+  }
 }
 
 function sleep(ms) {
@@ -720,7 +765,8 @@ async function startDshWeb() {
   const pid = spawnDetached(cmd, argv, DSH_LOG);
   writePid('dsh', pid);
   const ready = await waitForPort(DSH_PORT, 25000);
-  return { started: true, ready, pid, port: DSH_PORT };
+  const token = ready ? await waitForDshToken(8000) : null;
+  return { started: true, ready, pid, port: DSH_PORT, token };
 }
 
 // OpenCode v2 is `opencode serve` (v2 API + web server); v1 used
@@ -932,7 +978,7 @@ async function handle(req, res) {
         opencode: servicePid('opencode'),
         antigravity: antigravityPid,
       },
-      dsh: { port: DSH_PORT, token: dshUp ? dshToken() : null },
+      dsh: { port: DSH_PORT, token: dshUp ? await verifiedDshToken() : null },
       opencode: { port: OPENCODE_PORT, password: opencodeUp ? opencodePassword() : null },
       chat: chatAgents().map((a) => ({ ...a, session: readChatSession(a.id) })),
       display: detectDisplay(),
@@ -1047,7 +1093,12 @@ async function handle(req, res) {
 
   if (req.method === 'POST' && route === '/api/start-dsh') {
     if (await portOpen(DSH_PORT)) {
-      return json(res, 200, { started: false, running: true, pid: servicePid('dsh') });
+      return json(res, 200, {
+        started: false,
+        running: true,
+        pid: servicePid('dsh'),
+        token: await verifiedDshToken(),
+      });
     }
     if (startingNow('dsh')) return json(res, 200, { started: false, running: true, starting: true });
     const result = await startOnce('dsh', async () => startDshWeb());
