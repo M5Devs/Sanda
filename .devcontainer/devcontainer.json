@@ -1,0 +1,35 @@
+{
+  "name": "Sanda — Cloud Linux Desktop + AI Coding Agents",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/desktop-lite:1": {
+      "version": "latest",
+      "webPort": "6080",
+      "vncPort": "5901",
+      "password": "vscode"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "os-provided",
+      "installTools": false
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "latest"
+    }
+  },
+  "forwardPorts": [6080, 3080],
+  "portsAttributes": {
+    "6080": {
+      "label": "Linux Desktop (noVNC)",
+      "onAutoForward": "notify"
+    },
+    "3080": {
+      "label": "DeepSeek Harness Web UI",
+      "onAutoForward": "notify"
+    }
+  },
+  "postCreateCommand": "bash .sanda/setup.sh",
+  "remoteUser": "vscode"
+}
