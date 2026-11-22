@@ -3,11 +3,14 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
-// Codespaces serves every forwarded port as <name>-<port>.app.github.dev.
+// Codespaces serves every forwarded port as <name>-<port>.<domain>, on both the
+// current app.github.dev domain and the older githubpreview.dev one.
+const CODESPACE_HOST = /^(.*)-(\d+)\.(app\.github\.dev|githubpreview\.dev)$/;
+
 function portUrl(port) {
   const { protocol, hostname } = window.location;
-  const match = hostname.match(/^(.*)-(\d+)\.app\.github\.dev$/);
-  if (match) return `https://${match[1]}-${port}.app.github.dev`;
+  const match = hostname.match(CODESPACE_HOST);
+  if (match) return `https://${match[1]}-${port}.${match[3]}`;
   return `${protocol}//${hostname}:${port}`;
 }
 
@@ -27,6 +30,11 @@ async function api(path, body) {
 
 const state = {
   tools: [],
+  // Jobs and service actions that are still running. The 15s status poll must
+  // not reset a button that belongs to an action the user just started.
+  installs: new Set(),
+  busy: new Set(),
+  sessions: {},
   chat: { agent: 'pi', busy: false },
 };
 
@@ -85,7 +93,11 @@ function renderTools(tools) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'btn btn-small';
-      btn.textContent = 'Install';
+      // A poll in the middle of an install rebuilds this card; keep the job
+      // visible instead of offering a second Install.
+      const running = state.installs.has(tool.id);
+      btn.textContent = running ? 'Installing…' : 'Install';
+      btn.disabled = running;
       btn.addEventListener('click', () => installTool(tool, btn));
       card.append(btn);
     }
@@ -98,10 +110,18 @@ function renderTools(tools) {
 }
 
 async function installTool(tool, btn) {
+  state.installs.add(tool.id);
   btn.disabled = true;
   btn.textContent = 'Installing…';
   openLog(`Installing ${tool.label}`);
   appendLine({ s: 'meta', m: `$ sanda install ${tool.install}` });
+
+  const finish = () => {
+    state.installs.delete(tool.id);
+    btn.disabled = false;
+    btn.textContent = 'Install';
+    refresh();
+  };
 
   try {
     const { id } = await api('/api/install', { tool: tool.id });
@@ -116,22 +136,17 @@ async function installTool(tool, btn) {
       let code = 0;
       try { code = JSON.parse(event.data).code; } catch { /* ignore */ }
       appendLine({ s: code === 0 ? 'meta' : 'err', m: `— finished (exit ${code}) —` });
-      btn.disabled = false;
-      btn.textContent = 'Install';
-      refresh();
+      finish();
     });
 
     source.onerror = () => {
       source.close();
       appendLine({ s: 'err', m: 'log stream closed' });
-      btn.disabled = false;
-      btn.textContent = 'Install';
-      refresh();
+      finish();
     };
   } catch (err) {
     appendLine({ s: 'err', m: err.message });
-    btn.disabled = false;
-    btn.textContent = 'Install';
+    finish();
   }
 }
 
@@ -144,6 +159,7 @@ const SERVICES = {
 
 function setPortState(which, up) {
   const el = $(`#${which}-state`);
+  if (!el) return;
   el.className = `pill ${up ? 'pill-ok' : 'pill-idle'}`;
   el.textContent = up ? 'running' : 'stopped';
 }
@@ -178,6 +194,25 @@ function toggleLink(which, up, port, query) {
   }
 }
 
+// Start when stopped; Stop + Restart when running. Hidden buttons keep their
+// tap target out of the way on a phone.
+function setServiceButtons(id, running) {
+  const start = $(`#start-${id}`);
+  const stop = $(`#${id}-stop`);
+  const restart = $(`#${id}-restart`);
+  const busy = state.busy.has(id);
+  if (start) {
+    start.hidden = running;
+    start.disabled = busy;
+    if (!busy) start.textContent = id === 'antigravity' ? 'Launch' : 'Start';
+  }
+  for (const btn of [stop, restart]) {
+    if (!btn) continue;
+    btn.hidden = !running;
+    btn.disabled = busy;
+  }
+}
+
 async function waitForPort(id, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -192,22 +227,39 @@ async function waitForPort(id, timeoutMs) {
   return false;
 }
 
-async function startService(id, btn) {
+async function waitForPortDown(id, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const ports = await api('/api/ports');
+      if (!ports[id]) return true;
+    } catch {
+      /* keep polling */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+async function startService(id) {
   const svc = SERVICES[id];
   const noteId = `${id}-note`;
-  const original = btn.textContent;
+  const btn = $(`#start-${id}`);
 
+  state.busy.add(id);
   setNote(noteId, '');
-  btn.disabled = true;
-  btn.textContent = 'Starting…';
+  setServiceButtons(id, false);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Starting…';
+  }
   openLog(`Starting ${svc.label}`);
   appendLine({ s: 'meta', m: `Starting ${svc.label} on port ${svc.port}…` });
 
   try {
     const result = await api(`/api/start-${id}`, {});
     if (result.running) {
-      appendLine({ s: 'meta', m: 'Already running.' });
-      refresh();
+      appendLine({ s: 'meta', m: result.starting ? 'Already starting…' : 'Already running.' });
       return;
     }
     if (result.install) {
@@ -233,21 +285,71 @@ async function startService(id, btn) {
       setNote(noteId, `Port ${svc.port} is still closed. Check ${svc.log}.`);
       appendLine({ s: 'err', m: `Port ${svc.port} is still closed.` });
     }
-    refresh();
   } catch (err) {
     setNote(noteId, err.message);
     appendLine({ s: 'err', m: err.message });
   } finally {
-    btn.disabled = false;
-    btn.textContent = original;
+    state.busy.delete(id);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Start';
+    }
+    refresh();
   }
 }
 
-async function startAntigravity(btn) {
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'Launching…';
+async function stopService(id) {
+  const svc = SERVICES[id] || { label: 'Antigravity Desktop' };
+  const btn = $(`#${id}-stop`);
+
+  state.busy.add(id);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Stopping…';
+  }
+  openLog(`Stopping ${svc.label}`);
+
+  try {
+    const result = await api(`/api/stop-${id}`, {});
+    if (result.error) {
+      setNote(`${id}-note`, result.error);
+      appendLine({ s: 'err', m: result.error });
+    } else if (result.wasRunning === false) {
+      appendLine({ s: 'meta', m: `${svc.label} was not running.` });
+    } else {
+      appendLine({ s: 'meta', m: `Stopped (pid ${result.pid}).` });
+    }
+    if (id === 'opencode') $('#opencode-password-row').hidden = true;
+  } catch (err) {
+    setNote(`${id}-note`, err.message);
+    appendLine({ s: 'err', m: err.message });
+  } finally {
+    state.busy.delete(id);
+    if (btn) btn.textContent = 'Stop';
+    refresh();
+  }
+}
+
+async function restartService(id) {
+  if (state.busy.has(id)) return;
+  await stopService(id);
+  if (SERVICES[id]) {
+    await waitForPortDown(id, 15000);
+    await startService(id);
+  } else {
+    await startAntigravity();
+  }
+}
+
+async function startAntigravity() {
+  const btn = $('#start-antigravity');
+  state.busy.add('antigravity');
   setNote('antigravity-note', '');
+  setServiceButtons('antigravity', false);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Launching…';
+  }
 
   try {
     const result = await api('/api/start-antigravity', {});
@@ -255,7 +357,7 @@ async function startAntigravity(btn) {
       setNote('antigravity-note', 'Antigravity Desktop is not installed yet — install it above.');
       return;
     }
-    if (!result.started) {
+    if (!result.started && !result.running) {
       const detail = result.log ? ` ${result.log.split('\n').slice(-2).join(' ')}` : '';
       setNote('antigravity-note', `${result.error || 'Launch failed'}.${detail}`);
       return;
@@ -264,14 +366,15 @@ async function startAntigravity(btn) {
       'antigravity-note',
       `Running on DISPLAY ${result.display}. Open the Linux Desktop to use it.`
     );
-    const pill = $('#antigravity-state');
-    pill.className = 'pill pill-ok';
-    pill.textContent = 'launched';
   } catch (err) {
     setNote('antigravity-note', err.message);
   } finally {
-    btn.disabled = false;
-    btn.textContent = original;
+    state.busy.delete('antigravity');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Launch';
+    }
+    refresh();
   }
 }
 
@@ -342,6 +445,7 @@ async function sendChat(prompt) {
     state.chat.busy = false;
     send.disabled = false;
     send.textContent = 'Send';
+    refresh();
   }
 }
 
@@ -354,6 +458,35 @@ function updateChatHint() {
   }
 }
 
+// "continuing chat" tells the user the next message carries the conversation;
+// New chat forgets the stored session.
+function updateChatSession() {
+  const el = $('#chat-session');
+  if (!el) return;
+  el.textContent = state.sessions[state.chat.agent] ? 'continuing chat' : 'new chat';
+}
+
+function clearChatLog() {
+  const log = $('#chat-log');
+  log.textContent = '';
+  const empty = document.createElement('p');
+  empty.className = 'chat-empty';
+  empty.textContent = 'Pick an agent, type a prompt, tap Send.';
+  log.append(empty);
+}
+
+async function newChat() {
+  const agent = state.chat.agent;
+  try {
+    await api('/api/chat/reset', { agent });
+    state.sessions[agent] = null;
+  } catch (err) {
+    setNote('chat-hint', err.message);
+  }
+  clearChatLog();
+  updateChatSession();
+}
+
 function selectAgent(btn) {
   state.chat.agent = btn.dataset.agent;
   for (const other of $$('#chat-agents .seg')) {
@@ -363,6 +496,7 @@ function selectAgent(btn) {
   }
   $('#chat-input').placeholder = `Ask ${btn.textContent} to explain this repo…`;
   updateChatHint();
+  updateChatSession();
 }
 
 // ---- status ---------------------------------------------------------------
@@ -374,21 +508,32 @@ async function refresh() {
     renderTools(status.tools);
     updateChatHint();
 
+    for (const agent of status.chat || []) state.sessions[agent.id] = agent.session;
+    updateChatSession();
+
+    // While an action owns a card, leave its buttons alone: a poll landing in
+    // the middle of "Starting…" must not re-enable Start.
+    for (const id of ['dsh', 'opencode']) {
+      const up = Boolean(status.running[id]);
+      if (!state.busy.has(id)) setPortState(id, up);
+      setServiceButtons(id, up);
+    }
+
     setPortState('desktop', status.running.desktop);
-    setPortState('dsh', status.running.dsh);
-    setPortState('opencode', status.running.opencode);
     $('#desktop-link').href = portUrl(6080);
     toggleLink('dsh', status.running.dsh, 3080, status.dsh && status.dsh.token);
     toggleLink('opencode', status.running.opencode, 4096);
 
     const antigravity = status.tools.find((t) => t.id === 'antigravity-desktop');
     const agPill = $('#antigravity-state');
+    const agRunning = Boolean(status.running.antigravity);
     if (!antigravity || !antigravity.installed) {
       agPill.className = 'pill pill-idle';
       agPill.textContent = 'not installed';
-    } else if (agPill.textContent !== 'launched') {
-      agPill.className = 'pill pill-ok';
-      agPill.textContent = 'ready';
+      setServiceButtons('antigravity', false);
+    } else {
+      if (!state.busy.has('antigravity')) setPortState('antigravity', agRunning);
+      setServiceButtons('antigravity', agRunning);
     }
 
     const password = status.opencode && status.opencode.password;
@@ -423,9 +568,15 @@ async function runCommand(cmd) {
 // ---- wiring ---------------------------------------------------------------
 
 $('#refresh').addEventListener('click', refresh);
-$('#start-dsh').addEventListener('click', (event) => startService('dsh', event.currentTarget));
-$('#start-opencode').addEventListener('click', (event) => startService('opencode', event.currentTarget));
-$('#start-antigravity').addEventListener('click', (event) => startAntigravity(event.currentTarget));
+
+for (const id of ['dsh', 'opencode']) {
+  $(`#start-${id}`).addEventListener('click', () => startService(id));
+  $(`#${id}-stop`).addEventListener('click', () => stopService(id));
+  $(`#${id}-restart`).addEventListener('click', () => restartService(id));
+}
+$('#start-antigravity').addEventListener('click', startAntigravity);
+$('#antigravity-stop').addEventListener('click', () => stopService('antigravity'));
+$('#antigravity-restart').addEventListener('click', () => restartService('antigravity'));
 
 $('#opencode-copy').addEventListener('click', async () => {
   const text = $('#opencode-password').textContent;
@@ -484,14 +635,7 @@ $('#chat-input').addEventListener('keydown', (event) => {
   }
 });
 
-$('#chat-reset').addEventListener('click', () => {
-  const log = $('#chat-log');
-  log.textContent = '';
-  const empty = document.createElement('p');
-  empty.className = 'chat-empty';
-  empty.textContent = 'Pick an agent, type a prompt, tap Send.';
-  log.append(empty);
-});
+$('#chat-reset').addEventListener('click', newChat);
 
 refresh();
 setInterval(() => {

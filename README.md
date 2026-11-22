@@ -6,7 +6,6 @@
 
 No PC required. Turn a phone or tablet into a full Linux workstation with AI coding agents.
 
-[![Use this Template](https://img.shields.io/badge/Use_this_Template-Create_your_own_repo-2ea44f?style=for-the-badge&logo=github&logoColor=white)](https://github.com/M5Devs/Sanda/generate)
 [![Open in GitHub Codespaces](https://img.shields.io/badge/Open_in_Codespaces-181717?style=for-the-badge&logo=githubcodespaces&logoColor=white)](https://codespaces.new/M5Devs/Sanda)
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
@@ -14,7 +13,7 @@ No PC required. Turn a phone or tablet into a full Linux workstation with AI cod
 
 ---
 
-Sanda is a ready-to-use GitHub **template** that boots a Codespace with three ways to work:
+Sanda boots a Codespace with three ways to work:
 
 - **Sanda Workspace Hub** (port `4040`) — a mobile-first web control center: install agents, chat with them, start their web UIs, open the desktop, run quick commands. No terminal, no arrow keys.
 - **`sanda` CLI** — a plain numbered menu, built for phone keyboards.
@@ -56,17 +55,11 @@ flowchart LR
 
 ## Quick start (about 5 minutes, from your phone)
 
-### 1. Tap **Use this template** — don't fork
+### 1. Pick the copy you want to work in
 
-[![Use this Template](https://img.shields.io/badge/Use_this_Template-2ea44f?style=flat-square&logo=github&logoColor=white)](https://github.com/M5Devs/Sanda/generate)
-
-A **fork** stays public and linked to this repository, so your experiments and half-finished projects are visible to everyone.
-
-**Use this template** creates a brand-new repository that belongs to you:
-
-- choose **Private** — nobody can see your work,
-- your own history, issues, and settings, with no upstream noise,
-- still one tap to open in Codespaces.
+Work on Sanda directly, or keep your own private space: fork it or create a
+repository from it in GitHub, then open the Codespace from that copy. A private
+copy keeps your work, history and settings out of sight.
 
 ### 2. Add your API keys as Codespaces Secrets
 
@@ -120,13 +113,28 @@ The hub is a zero-dependency Node server (`.sanda/web/server.js`) that starts au
 | Card | What the button does |
 | --- | --- |
 | **Linux Desktop** (`6080`) | Opens noVNC in a new tab |
-| **DeepSeek Harness** (`3080`) | **Start** runs `dsh-web` in the background, then **Open** appears |
+| **DeepSeek Harness** (`3080`) | **Start** runs `dsh-web` in the background, then **Open**, **Stop** and **Restart** appear |
 | **OpenCode Web** (`4096`) | **Start** runs `opencode serve`, then shows the login **password** with a copy button |
-| **Antigravity Desktop** | **Launch** starts the GUI app on the desktop display (`:1`) |
+| **Antigravity Desktop** | **Launch** starts the GUI app on the desktop display (`:1`); **Stop** closes it |
+
+**Stop** and **Restart** appear on a card as soon as its service is running.
+Each service the hub starts records its pid in `/tmp/sanda-<service>.pid`, so
+**Stop** ends the whole process group (the Electron helpers included) and
+**Restart** stops then starts it again. Starting is idempotent: a double tap, or
+a second browser tab, cannot spawn a second copy — the hub waits until the port
+answers before it reports the service as up. A service you started yourself in a
+terminal has no pidfile, so **Stop** tells you to end it from there instead of
+guessing which process to kill.
 
 Links are built from the Codespaces hostname (`<name>-4040.app.github.dev` → `<name>-6080.app.github.dev`), or `localhost` when you run it locally.
 
 **Mobile agent chat** — pick **Pi** or **Codex**, type a prompt, tap **Send**, and the answer streams into the page as bubbles. This is the fastest path from a phone: no terminal, no tmux, no arrow keys. `Ctrl`/`Cmd`+`Enter` sends from a hardware keyboard; on a phone just tap **Send**.
+
+The chat is **sessionful**: the header shows *continuing chat* once a session
+exists, and every later message continues it (`pi --session-id …`,
+`codex exec resume …`). Tap **⟲ New chat** to forget the session and start fresh.
+The session id is kept in `/tmp/sanda-chat/`, so it survives a page reload but
+not a Codespace rebuild.
 
 **Quick command** — a text field plus chips (`sanda --status`, `sanda web`, `ls -la`, `git status`, `df -h`) that run in the workspace and print the result.
 
@@ -136,14 +144,20 @@ Links are built from the Codespaces hostname (`<name>-4040.app.github.dev` → `
 | `GET /api/ports` | which of the tracked ports are listening |
 | `POST /api/install` | start `sanda install <tool>` |
 | `GET /api/jobs/<id>/events` | live install or chat output (SSE) |
-| `POST /api/chat` | run `pi -p` or `codex exec` non-interactively |
+| `POST /api/chat` | run `pi -p` or `codex exec`, resuming that agent's session |
+| `POST /api/chat/reset` | forget the stored session (the **New chat** button) |
 | `POST /api/exec` | run one shell command |
 | `POST /api/start-dsh` | start the DeepSeek web UI on `3080` |
 | `POST /api/start-opencode` | start `opencode serve` on `4096` |
 | `POST /api/start-antigravity` | launch the Antigravity desktop app |
+| `POST /api/stop-<service>` | stop a service the hub started (`dsh`, `opencode`, `antigravity`) |
 | `GET /api/health` | liveness probe used by the launcher |
 
-The server listens on `0.0.0.0` so the Codespaces proxy can reach it, and it only accepts **same-origin JSON** posts (a foreign site or another Codespace cannot drive it). Keep the port visibility **Private** (the default) — the hub can run commands as you.
+Mutating requests must be `application/json` and come from the hub's own origin
+(`<codespace>-4040.app.github.dev`, `githubpreview.dev`, or `localhost`).
+`/api/status` is checked the same way because it returns the OpenCode password.
+
+The server listens on `0.0.0.0` so the Codespaces proxy can reach it. Only the hub's own origin is trusted: a foreign site, another Codespace, or another port of this Codespace (the desktop, an agent UI) cannot read the status payload or drive the API. Keep the port visibility **Private** (the default) — the hub can run commands as you.
 
 Restart it any time with:
 
@@ -309,6 +323,8 @@ Your files, secrets, and installed agents are kept. Starting it again takes seco
 | Port `4096` shows nothing | Tap **Start** on the OpenCode card; check `/tmp/sanda-opencode.log`. |
 | OpenCode asks for a password | Read it from the OpenCode card (copy button) or `grep -i password /tmp/sanda-opencode.log`. |
 | Chat says "not installed yet" | Install that agent in **AI coding tools** first. |
+| Chat forgets the earlier messages | Check the header: after **⟲ New chat**, or a Codespace rebuild, the next message starts a new session. |
+| Stop says the service was started outside the hub | It was launched from a terminal, so it has no pidfile. Stop it there (`pkill -f "dsh web"`, `pkill -f "opencode serve"`, `pkill -f antigravity`). |
 | Agent replies with a login error | Add the API key as a Codespaces secret, or run the agent's own `login` command once. |
 | Desktop is black or frozen | Reload the noVNC tab, then restart the session: `sudo pkill -f Xtigervnc` (the desktop restarts itself). |
 | Desktop icons are missing | Run `bash .sanda/setup.sh` again, then restart the desktop. |
@@ -329,6 +345,8 @@ Your files, secrets, and installed agents are kept. Starting it again takes seco
     server.js              # zero-dependency dashboard API + static server
     start.sh               # idempotent launcher used by postStartCommand
     public/                # index.html, styles.css, app.js (mobile-first UI)
+.github/
+  workflows/ci.yml         # bash -n, node --check, shellcheck, JSON check
 README.md
 LICENSE
 ```

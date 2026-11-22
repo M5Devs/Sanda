@@ -55,8 +55,11 @@
         <span class="launch-actions">
           <span id="dsh-state" class="pill pill-idle">checking</span>
           <a id="dsh-link" class="btn btn-ghost" href="#" target="_blank" rel="noopener" hidden>Open</a>
+          <button id="dsh-stop" class="btn btn-ghost" type="button" hidden>Stop</button>
+          <button id="dsh-restart" class="btn btn-ghost" type="button" hidden>Restart</button>
           <button id="start-dsh" class="btn btn-ghost" type="button">Start</button>
         </span>
+        <p id="dsh-note" class="card-note" hidden></p>
       </div>
 
       <div class="launch-card">
@@ -68,6 +71,8 @@
         <span class="launch-actions">
           <span id="opencode-state" class="pill pill-idle">checking</span>
           <a id="opencode-link" class="btn btn-ghost" href="#" target="_blank" rel="noopener" hidden>Open</a>
+          <button id="opencode-stop" class="btn btn-ghost" type="button" hidden>Stop</button>
+          <button id="opencode-restart" class="btn btn-ghost" type="button" hidden>Restart</button>
           <button id="start-opencode" class="btn btn-ghost" type="button">Start</button>
         </span>
         <div id="opencode-password-row" class="password-row" hidden>
@@ -86,6 +91,8 @@
         </span>
         <span class="launch-actions">
           <span id="antigravity-state" class="pill pill-idle">checking</span>
+          <button id="antigravity-stop" class="btn btn-ghost" type="button" hidden>Stop</button>
+          <button id="antigravity-restart" class="btn btn-ghost" type="button" hidden>Restart</button>
           <button id="start-antigravity" class="btn btn-ghost" type="button">Launch</button>
         </span>
         <p id="antigravity-note" class="card-note" hidden></p>
@@ -96,7 +103,10 @@
   <section class="panel" id="chat-panel">
     <div class="panel-head">
       <h2>Mobile agent chat</h2>
-      <button id="chat-reset" class="icon-btn" type="button" title="New chat" aria-label="New chat">⟲</button>
+      <div class="chat-actions">
+        <span id="chat-session" class="muted">new chat</span>
+        <button id="chat-reset" class="icon-btn" type="button" title="New chat" aria-label="New chat">⟲</button>
+      </div>
     </div>
 
     <div id="chat-agents" class="segmented" role="tablist" aria-label="Agent">

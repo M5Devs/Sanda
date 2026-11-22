@@ -188,8 +188,21 @@ main { padding: 16px; display: grid; gap: 16px; max-width: 860px; margin: 0 auto
 .launch-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   margin-left: auto;
+}
+
+/* Session label + New chat sit together at the end of the chat header. */
+.chat-actions { display: flex; align-items: center; gap: 8px; }
+
+/* On a phone the pill plus Open/Stop/Restart need the full card width, so the
+   action row drops below the title instead of wrapping mid-row. */
+@media (max-width: 520px) {
+  .launch-actions { flex: 1 1 100%; gap: 6px; }
+  .launch-actions .btn { padding: 8px 10px; min-height: 38px; font-size: 12.5px; }
+  .launch-actions .pill { font-size: 10.5px; padding: 3px 8px; }
 }
 
 /* Notes, hints and the OpenCode password take a full row of the card. */

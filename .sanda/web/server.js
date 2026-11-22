@@ -7,16 +7,17 @@
 //   GET  /api/status                     tools, ports, chat agents, display
 //   GET  /api/ports                      which local ports are listening
 //   POST /api/install   {tool}           run `sanda install <tool>` as a job
-//   POST /api/chat      {agent, prompt}  run pi/codex non-interactively as a job
+//   POST /api/chat      {agent, prompt}  run pi/codex, resuming the agent session
+//   POST /api/chat/reset {agent}         forget the stored session (New chat)
 //   POST /api/exec      {cmd}            run one shell command
 //   POST /api/start-dsh                  DeepSeek Harness web UI (3080)
 //   POST /api/start-opencode             OpenCode v2 `serve` / v1 `web` (4096)
 //   POST /api/start-antigravity          Antigravity Desktop inside XFCE (6080)
+//   POST /api/stop-<service>             stop a service the hub started
 //   GET  /api/jobs/:id/events            SSE stream of a job's output
 //
 // Binds 0.0.0.0 so Codespaces port forwarding always reaches it. Mutating
-// requests must be JSON and same-origin: localhost, or the same Codespace
-// (<name>-<port>.app.github.dev).
+// requests must be JSON and come from the hub's own origin.
 
 const http = require('http');
 const fs = require('fs');
@@ -47,6 +48,30 @@ const OPENCODE_PORT = 4096;
 const DSH_LOG = '/tmp/sanda-dsh-web.log';
 const OPENCODE_LOG = '/tmp/sanda-opencode.log';
 const ANTIGRAVITY_LOG = '/tmp/sanda-antigravity.log';
+
+// One pidfile per service the hub can spawn. A second tap (or a second tab)
+// then finds the process instead of starting a duplicate.
+const SERVICES = {
+  dsh: {
+    label: 'DeepSeek Harness',
+    port: DSH_PORT,
+    pidFile: '/tmp/sanda-dsh.pid',
+  },
+  opencode: {
+    label: 'OpenCode Web',
+    port: OPENCODE_PORT,
+    pidFile: '/tmp/sanda-opencode.pid',
+  },
+  antigravity: {
+    label: 'Antigravity Desktop',
+    port: null,
+    pidFile: '/tmp/sanda-antigravity.pid',
+  },
+};
+
+// Chat sessions are stored by the agents themselves; the hub only remembers
+// which session id to resume.
+const CHAT_SESSION_DIR = '/tmp/sanda-chat';
 
 const EXEC_TIMEOUT_MS = 30000;
 const CHAT_TIMEOUT_MS = 240000;
@@ -238,9 +263,119 @@ function alive(pid) {
   }
 }
 
+// Every service is spawned detached, so it leads its own process group; signal
+// the group to take Electron/VNC helpers down with it.
+function killGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function truncateLog(file) {
+  try {
+    fs.writeFileSync(file, '');
+  } catch {
+    /* log directory is not writable; appending still works */
+  }
+}
+
+function readPid(name) {
+  const svc = SERVICES[name];
+  if (!svc) return null;
+  try {
+    const pid = Number(fs.readFileSync(svc.pidFile, 'utf8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePid(name, pid) {
+  try {
+    fs.writeFileSync(SERVICES[name].pidFile, `${pid}\n`);
+  } catch {
+    /* pidfiles are a convenience; the port check still works without them */
+  }
+}
+
+function clearPid(name) {
+  try {
+    fs.unlinkSync(SERVICES[name].pidFile);
+  } catch {
+    /* already gone */
+  }
+}
+
+// The pidfile is only trusted while the process is alive.
+function servicePid(name) {
+  const pid = readPid(name);
+  if (pid && alive(pid)) return pid;
+  if (pid) clearPid(name);
+  return null;
+}
+
+async function stopService(name) {
+  const svc = SERVICES[name];
+  if (!svc) return { stopped: false, error: 'unknown service' };
+
+  const pid = servicePid(name);
+  if (!pid) {
+    const stillUp = svc.port ? await portOpen(svc.port) : false;
+    if (stillUp) {
+      return {
+        stopped: false,
+        running: true,
+        error: `${svc.label} was started outside the hub; stop it from a terminal.`,
+      };
+    }
+    return { stopped: false, running: false, wasRunning: false };
+  }
+
+  killGroup(pid, 'SIGTERM');
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline && alive(pid)) await sleep(150);
+  if (alive(pid)) killGroup(pid, 'SIGKILL');
+  clearPid(name);
+
+  const closed = svc.port ? !(await portOpen(svc.port)) : !alive(pid);
+  return { stopped: closed, wasRunning: true, pid };
+}
+
+// Starting is idempotent: concurrent requests share one spawn, and a service
+// whose port is not up yet is reported as starting instead of spawned twice.
+const starting = new Map();
+
+function startOnce(name, fn) {
+  if (starting.has(name)) return starting.get(name);
+  const pending = (async () => {
+    try {
+      return await fn();
+    } finally {
+      starting.delete(name);
+    }
+  })();
+  starting.set(name, pending);
+  return pending;
+}
+
+function startingNow(name) {
+  return starting.has(name);
+}
+
 // detached: true calls setsid(), so the child survives the parent (and the
 // postStartCommand shell) exiting.
 function spawnDetached(cmd, args, logFile, env) {
+  // A fresh start gets a fresh log: these files are append-only for the life of
+  // the process, and nothing rotates them.
+  truncateLog(logFile);
   const log = fs.openSync(logFile, 'a');
   try {
     const child = spawn(cmd, args, {
@@ -272,14 +407,16 @@ function execCapture(cmd, args, timeoutMs, env) {
 
     let child;
     try {
-      child = spawn(cmd, args, { cwd: REPO_DIR, env: env || process.env });
+      // Detached so a timeout can kill the whole group: `bash -lc` children
+      // (npm, curl, a watcher) would otherwise outlive the request.
+      child = spawn(cmd, args, { cwd: REPO_DIR, env: env || process.env, detached: true });
     } catch (err) {
       resolve({ code: 127, stdout, stderr: err.message });
       return;
     }
 
     timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      killGroup(child.pid, 'SIGKILL');
       done(124);
     }, timeoutMs);
 
@@ -369,7 +506,12 @@ function startJob(cmd, args, options = {}) {
 
   const push = (stream, chunk) => {
     for (const line of chunk.toString('utf8').split(/\r?\n/)) {
-      if (line.trim()) pushLine(job, stream, line);
+      if (!line.trim()) continue;
+      // options.transform can rewrite a line (Codex --json) or drop it.
+      const events = options.transform ? options.transform(stream, line) : [{ s: stream, m: line }];
+      for (const event of events || []) {
+        if (event && event.m) pushLine(job, event.s || stream, event.m);
+      }
     }
   };
 
@@ -421,6 +563,70 @@ async function helpText(bin, preArgs) {
 
 // pi uses -p/--print, codex uses `exec`; both flags are probed from --help so
 // older or newer releases degrade to a clear error instead of a broken command.
+//
+// Sessions: pi takes a stable --session-id, codex needs the thread id it prints
+// on the first turn and `exec resume <id>` afterwards. The id is kept in
+// /tmp/sanda-chat so the next message continues the same conversation.
+function chatSessionFile(agentId) {
+  return path.join(CHAT_SESSION_DIR, `${agentId}.session`);
+}
+
+function readChatSession(agentId) {
+  try {
+    return fs.readFileSync(chatSessionFile(agentId), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeChatSession(agentId, id) {
+  try {
+    fs.mkdirSync(CHAT_SESSION_DIR, { recursive: true });
+    fs.writeFileSync(chatSessionFile(agentId), `${id}\n`);
+  } catch {
+    /* without a session file each message starts a new chat */
+  }
+}
+
+function resetChatSession(agentId) {
+  try {
+    fs.rmSync(chatSessionFile(agentId), { force: true });
+  } catch {
+    /* nothing stored */
+  }
+}
+
+// Codex --json streams one event per line; show the agent text, keep the rest
+// out of the chat. The thread id is what a later `exec resume` needs.
+function codexJsonFilter(agentId) {
+  return (stream, line) => {
+    const text = line.trim();
+    if (!text.startsWith('{')) return [{ s: stream, m: line }];
+    let event;
+    try {
+      event = JSON.parse(text);
+    } catch {
+      return [{ s: stream, m: line }];
+    }
+    if (event.type === 'thread.started' && event.thread_id) {
+      writeChatSession(agentId, event.thread_id);
+      return [];
+    }
+    if (event.type === 'item.completed') {
+      const item = event.item || {};
+      if (item.type === 'agent_message' && item.text) return [{ s: 'out', m: item.text }];
+      if (item.type === 'command_execution' && item.command) return [{ s: 'meta', m: `$ ${item.command}` }];
+      if (item.type === 'error' && item.message) return [{ s: 'err', m: item.message }];
+      return [];
+    }
+    if (event.type === 'error' && event.message) return [{ s: 'err', m: event.message }];
+    if (event.type === 'turn.failed') {
+      return [{ s: 'err', m: (event.error && event.error.message) || 'turn failed' }];
+    }
+    return [];
+  };
+}
+
 async function prepareChat(agentId, prompt) {
   const agent = CHAT_AGENTS[agentId];
   if (!agent) return { error: 'unknown agent' };
@@ -436,22 +642,51 @@ async function prepareChat(agentId, prompt) {
       return { error: 'This Pi build has no --print mode. Update Pi and try again.' };
     }
     const args = ['-p'];
-    if (/--no-session/.test(help)) args.push('--no-session');
+    let session = readChatSession('pi');
+    if (/--session-id/.test(help)) {
+      if (!session) {
+        session = `sanda-pi-${Date.now()}`;
+        writeChatSession('pi', session);
+      }
+      args.push('--session-id', session);
+    } else if (/--no-session/.test(help)) {
+      args.push('--no-session');
+      session = null;
+    }
     args.push(prompt);
-    return { bin, args };
+    return { bin, args, session, transform: null };
   }
 
   const help = await helpText(bin, ['exec']);
   if (!/codex exec/.test(help)) {
     return { error: 'This Codex build has no `exec` mode. Update Codex and try again.' };
   }
+
+  const stored = readChatSession('codex');
+  let resuming = false;
+  if (stored) {
+    const resumeHelp = await helpText(bin, ['exec', 'resume']);
+    resuming = /codex exec resume/.test(resumeHelp);
+  }
+
+  const json = /--json/.test(help);
   const args = ['exec'];
-  if (/--color/.test(help)) args.push('--color', 'never');
-  if (/--ephemeral/.test(help)) args.push('--ephemeral');
+  if (resuming) args.push('resume', stored);
+  if (!resuming && /--color/.test(help)) args.push('--color', 'never');
+  // --ephemeral would throw the session away, which is the opposite of what a
+  // follow-up message needs.
   if (/--skip-git-repo-check/.test(help)) args.push('--skip-git-repo-check');
-  if (/-s, --sandbox/.test(help)) args.push('-s', 'workspace-write');
+  if (!resuming && /-s, --sandbox/.test(help)) args.push('-s', 'workspace-write');
+  if (json) args.push('--json');
   args.push(prompt);
-  return { bin, args };
+
+  return {
+    bin,
+    args,
+    session: resuming ? stored : null,
+    resumed: resuming,
+    transform: json ? codexJsonFilter('codex') : null,
+  };
 }
 
 function chatEnv() {
@@ -460,22 +695,32 @@ function chatEnv() {
 
 // ---- service launchers ----------------------------------------------------
 
-function startDshWeb() {
+async function waitForPort(port, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await portOpen(port)) return true;
+    await sleep(250);
+  }
+  return false;
+}
+
+// The spawn lock has to live until the port answers: releasing it right after
+// spawn() lets a double-tap start a second instance before the first binds.
+async function startDshWeb() {
   const args = ['web', '--port', String(DSH_PORT), '--no-open'];
   const trusted = forwardOrigin(DSH_PORT);
   if (trusted) args.push('--trusted-host', trusted.replace('https://', ''));
 
   // Prefer an installed `dsh`; npx would download it again into its cache.
   const dsh = which('dsh');
-  if (dsh) {
-    return { started: true, pid: spawnDetached(dsh, args, DSH_LOG), port: DSH_PORT };
-  }
+  const cmd = dsh || which('npx');
+  if (!cmd) return { started: false, error: 'dsh is not installed and npx is missing' };
 
-  const npx = which('npx');
-  if (!npx) return { started: false, error: 'dsh is not installed and npx is missing' };
-
-  const pid = spawnDetached(npx, ['-y', '@deepseek-ai/dsh', ...args], DSH_LOG);
-  return { started: true, pid, port: DSH_PORT };
+  const argv = dsh ? args : ['-y', '@deepseek-ai/dsh', ...args];
+  const pid = spawnDetached(cmd, argv, DSH_LOG);
+  writePid('dsh', pid);
+  const ready = await waitForPort(DSH_PORT, 25000);
+  return { started: true, ready, pid, port: DSH_PORT };
 }
 
 // OpenCode v2 is `opencode serve` (v2 API + web server); v1 used
@@ -496,9 +741,10 @@ async function startOpencode() {
   const origin = forwardOrigin(OPENCODE_PORT);
   if (origin) args.push('--cors', origin);
 
-  fs.writeFileSync(OPENCODE_LOG, '');
   const pid = spawnDetached(bin, args, OPENCODE_LOG);
-  return { started: true, pid, port: OPENCODE_PORT, mode: subcommand };
+  writePid('opencode', pid);
+  const ready = await waitForPort(OPENCODE_PORT, 25000);
+  return { started: true, ready, pid, port: OPENCODE_PORT, mode: subcommand };
 }
 
 async function startAntigravity() {
@@ -517,11 +763,13 @@ async function startAntigravity() {
     ...process.env,
     DISPLAY: display,
   });
+  writePid('antigravity', pid);
 
   // Electron exits fast when it cannot reach the X server; report that here
   // instead of leaving the user with a button that silently does nothing.
   await sleep(1500);
   if (!alive(pid)) {
+    clearPid('antigravity');
     return {
       started: false,
       display,
@@ -566,10 +814,11 @@ function readJson(req) {
   });
 }
 
-const CODESPACE_HOST = /^(?<prefix>.+)-(?<port>\d+)\.(?:app\.github\.dev|githubpreview\.dev)$/;
-
-// Same-origin, or another port of the same Codespace (port forwarding rewrites
-// Host but keeps the <name>-<port> prefix).
+// Same origin, or the same Codespace's hub on its own port. Other ports of the
+// same Codespace are separate apps (the desktop, an agent UI) and get no say.
+const HUB_HOST = new RegExp(
+  `^(?<prefix>.+)-${PORT}\\.(?:app\\.github\\.dev|githubpreview\\.dev)$`
+);
 function isAllowedOrigin(origin, host) {
   if (!origin) return true;
   let parsed;
@@ -579,8 +828,8 @@ function isAllowedOrigin(origin, host) {
     return false;
   }
   if (parsed.host === host) return true;
-  const originMatch = parsed.hostname.match(CODESPACE_HOST);
-  const hostMatch = String(host || '').split(':')[0].match(CODESPACE_HOST);
+  const originMatch = parsed.hostname.match(HUB_HOST);
+  const hostMatch = String(host || '').split(':')[0].match(HUB_HOST);
   return Boolean(
     originMatch && hostMatch && originMatch.groups.prefix === hostMatch.groups.prefix
   );
@@ -653,18 +902,39 @@ async function handle(req, res) {
   }
 
   if (req.method === 'GET' && route === '/api/status') {
+    // The payload carries the OpenCode password and the dsh token, so it gets
+    // the same origin check as the mutating routes.
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
+      return json(res, 403, { error: 'cross-origin request refused' });
+    }
     const [dshUp, desktopUp, opencodeUp] = await Promise.all([
       portOpen(DSH_PORT),
       portOpen(DESKTOP_PORT),
       portOpen(OPENCODE_PORT),
     ]);
+    const antigravityPid = servicePid('antigravity');
     return json(res, 200, {
       tools: toolStatus(),
       ports: { dashboard: PORT, dsh: DSH_PORT, desktop: DESKTOP_PORT, opencode: OPENCODE_PORT },
-      running: { dsh: dshUp, desktop: desktopUp, opencode: opencodeUp },
+      running: {
+        dsh: dshUp,
+        desktop: desktopUp,
+        opencode: opencodeUp,
+        antigravity: Boolean(antigravityPid),
+      },
+      starting: {
+        dsh: startingNow('dsh'),
+        opencode: startingNow('opencode'),
+        antigravity: startingNow('antigravity'),
+      },
+      pids: {
+        dsh: servicePid('dsh'),
+        opencode: servicePid('opencode'),
+        antigravity: antigravityPid,
+      },
       dsh: { port: DSH_PORT, token: dshUp ? dshToken() : null },
       opencode: { port: OPENCODE_PORT, password: opencodeUp ? opencodePassword() : null },
-      chat: chatAgents(),
+      chat: chatAgents().map((a) => ({ ...a, session: readChatSession(a.id) })),
       display: detectDisplay(),
       codespace: process.env.CODESPACE_NAME || null,
     });
@@ -729,19 +999,37 @@ async function handle(req, res) {
       label: `${CHAT_AGENTS[agentId].label}: ${prompt.slice(0, 60)}`,
       timeoutMs: CHAT_TIMEOUT_MS,
       env: chatEnv(),
+      transform: prepared.transform,
     });
 
     if (body.wait) {
       const done = await job.finished;
+      // A resume that fails (session pruned, id unknown) should not poison the
+      // next message: forget the id so the following turn starts fresh.
+      if (prepared.resumed && done.code !== 0) resetChatSession(agentId);
       return json(res, 200, {
         id: job.id,
         agent: agentId,
+        session: readChatSession(agentId),
         code: done.code,
         output: job.lines.map((l) => l.m).join('\n'),
       });
     }
 
-    return json(res, 202, { id: job.id, agent: agentId });
+    return json(res, 202, { id: job.id, agent: agentId, session: prepared.session });
+  }
+
+  if (req.method === 'POST' && route === '/api/chat/reset') {
+    let body;
+    try {
+      body = await readJson(req);
+    } catch (err) {
+      return json(res, 400, { error: err.message });
+    }
+    const agentId = String(body.agent || '').trim();
+    if (!CHAT_AGENTS[agentId]) return json(res, 400, { error: 'unknown agent' });
+    resetChatSession(agentId);
+    return json(res, 200, { ok: true, agent: agentId, session: null });
   }
 
   if (req.method === 'POST' && route === '/api/exec') {
@@ -758,22 +1046,50 @@ async function handle(req, res) {
   }
 
   if (req.method === 'POST' && route === '/api/start-dsh') {
-    if (await portOpen(DSH_PORT)) return json(res, 200, { started: false, running: true });
-    const result = startDshWeb();
+    if (await portOpen(DSH_PORT)) {
+      return json(res, 200, { started: false, running: true, pid: servicePid('dsh') });
+    }
+    if (startingNow('dsh')) return json(res, 200, { started: false, running: true, starting: true });
+    const result = await startOnce('dsh', async () => startDshWeb());
     return json(res, result.started ? 202 : 500, result);
   }
 
   if (req.method === 'POST' && route === '/api/start-opencode') {
     if (await portOpen(OPENCODE_PORT)) {
-      return json(res, 200, { started: false, running: true, password: opencodePassword() });
+      return json(res, 200, {
+        started: false,
+        running: true,
+        pid: servicePid('opencode'),
+        password: opencodePassword(),
+      });
     }
-    const result = await startOpencode();
+    if (startingNow('opencode')) {
+      return json(res, 200, { started: false, running: true, starting: true });
+    }
+    const result = await startOnce('opencode', async () => startOpencode());
     return json(res, result.started ? 202 : 400, result);
   }
 
   if (req.method === 'POST' && route === '/api/start-antigravity') {
-    const result = await startAntigravity();
+    if (servicePid('antigravity')) {
+      return json(res, 200, {
+        started: false,
+        running: true,
+        pid: servicePid('antigravity'),
+        display: detectDisplay(),
+      });
+    }
+    if (startingNow('antigravity')) {
+      return json(res, 200, { started: false, running: true, starting: true });
+    }
+    const result = await startOnce('antigravity', async () => startAntigravity());
     return json(res, result.started ? 202 : 400, result);
+  }
+
+  const stopMatch = route.match(/^\/api\/stop-(dsh|opencode|antigravity)$/);
+  if (req.method === 'POST' && stopMatch) {
+    const result = await stopService(stopMatch[1]);
+    return json(res, result.error && !result.stopped ? 400 : 200, result);
   }
 
   if (req.method === 'GET' || req.method === 'HEAD') {

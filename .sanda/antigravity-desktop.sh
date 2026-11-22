@@ -47,6 +47,11 @@ log "Installing Electron runtime libraries (best effort)"
   || warn "Could not install libasound2"
 
 DEST="$HOME/.local/opt/antigravity"
+# Guard the wipe: an empty or unexpected HOME would turn this into `rm -rf /`.
+if [[ -z "${HOME:-}" || "$DEST" != "$HOME/"* ]]; then
+  warn "Refusing to remove '$DEST' (unexpected HOME)"
+  exit 1
+fi
 rm -rf "$DEST"
 mkdir -p "$DEST"
 
