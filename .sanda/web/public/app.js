@@ -1,6 +1,7 @@
 'use strict';
 
 const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 // Codespaces serves every forwarded port as <name>-<port>.app.github.dev.
 function portUrl(port) {
@@ -23,6 +24,11 @@ async function api(path, body) {
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
+
+const state = {
+  tools: [],
+  chat: { agent: 'pi', busy: false },
+};
 
 // ---- log viewer -----------------------------------------------------------
 
@@ -129,7 +135,12 @@ async function installTool(tool, btn) {
   }
 }
 
-// ---- ports ----------------------------------------------------------------
+// ---- launch cards ---------------------------------------------------------
+
+const SERVICES = {
+  dsh: { port: 3080, label: 'DeepSeek Harness', log: '/tmp/sanda-dsh-web.log' },
+  opencode: { port: 4096, label: 'OpenCode Web', log: '/tmp/sanda-opencode.log' },
+};
 
 function setPortState(which, up) {
   const el = $(`#${which}-state`);
@@ -137,20 +148,255 @@ function setPortState(which, up) {
   el.textContent = up ? 'running' : 'stopped';
 }
 
+function setNote(id, text) {
+  const el = $(`#${id}`);
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+// A 43-char password would otherwise force the card wider than the phone.
+// <wbr> adds wrap points but contributes no text, so copy still yields the
+// exact password.
+function setPassword(password) {
+  const el = $('#opencode-password');
+  el.textContent = '';
+  for (let i = 0; i < password.length; i += 8) {
+    if (i) el.append(document.createElement('wbr'));
+    el.append(password.slice(i, i + 8));
+  }
+}
+
+function toggleLink(which, up, port, query) {
+  const link = $(`#${which}-link`);
+  if (!link) return;
+  if (up) {
+    link.href = portUrl(port) + (query ? `/?token=${encodeURIComponent(query)}` : '');
+    link.hidden = false;
+  } else {
+    link.hidden = true;
+  }
+}
+
+async function waitForPort(id, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const ports = await api('/api/ports');
+      if (ports[id]) return true;
+    } catch {
+      /* keep polling */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  return false;
+}
+
+async function startService(id, btn) {
+  const svc = SERVICES[id];
+  const noteId = `${id}-note`;
+  const original = btn.textContent;
+
+  setNote(noteId, '');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  openLog(`Starting ${svc.label}`);
+  appendLine({ s: 'meta', m: `Starting ${svc.label} on port ${svc.port}…` });
+
+  try {
+    const result = await api(`/api/start-${id}`, {});
+    if (result.running) {
+      appendLine({ s: 'meta', m: 'Already running.' });
+      refresh();
+      return;
+    }
+    if (result.install) {
+      const msg = `${svc.label} is not installed yet — install it in AI coding tools above.`;
+      setNote(noteId, msg);
+      appendLine({ s: 'err', m: msg });
+      return;
+    }
+    if (result.error) {
+      setNote(noteId, result.error);
+      appendLine({ s: 'err', m: result.error });
+      return;
+    }
+
+    appendLine({ s: 'meta', m: `Started (pid ${result.pid}). Waiting for the port…` });
+    const up = await waitForPort(id, 40000);
+    if (up) {
+      appendLine({ s: 'meta', m: `Ready — ${portUrl(svc.port)}` });
+      if (id === 'opencode') {
+        appendLine({ s: 'meta', m: 'OpenCode v2 prints a login password; it is shown on the card.' });
+      }
+    } else {
+      setNote(noteId, `Port ${svc.port} is still closed. Check ${svc.log}.`);
+      appendLine({ s: 'err', m: `Port ${svc.port} is still closed.` });
+    }
+    refresh();
+  } catch (err) {
+    setNote(noteId, err.message);
+    appendLine({ s: 'err', m: err.message });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+async function startAntigravity(btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Launching…';
+  setNote('antigravity-note', '');
+
+  try {
+    const result = await api('/api/start-antigravity', {});
+    if (result.install) {
+      setNote('antigravity-note', 'Antigravity Desktop is not installed yet — install it above.');
+      return;
+    }
+    if (!result.started) {
+      const detail = result.log ? ` ${result.log.split('\n').slice(-2).join(' ')}` : '';
+      setNote('antigravity-note', `${result.error || 'Launch failed'}.${detail}`);
+      return;
+    }
+    setNote(
+      'antigravity-note',
+      `Running on DISPLAY ${result.display}. Open the Linux Desktop to use it.`
+    );
+    const pill = $('#antigravity-state');
+    pill.className = 'pill pill-ok';
+    pill.textContent = 'launched';
+  } catch (err) {
+    setNote('antigravity-note', err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+// ---- chat -----------------------------------------------------------------
+
+function scrollChat() {
+  const log = $('#chat-log');
+  log.scrollTop = log.scrollHeight;
+}
+
+function addBubble(role, text) {
+  const empty = $('#chat-log .chat-empty');
+  if (empty) empty.remove();
+
+  const bubble = document.createElement('div');
+  bubble.className = `msg ${role}`;
+  const pre = document.createElement('pre');
+  pre.textContent = text;
+  bubble.append(pre);
+  $('#chat-log').append(bubble);
+  scrollChat();
+  return pre;
+}
+
+function appendBubble(pre, text) {
+  pre.textContent += text;
+  scrollChat();
+}
+
+function streamJob(id, onLine) {
+  return new Promise((resolve) => {
+    const source = new EventSource(`/api/jobs/${id}/events`);
+    source.onmessage = (event) => {
+      try { onLine(JSON.parse(event.data)); } catch { /* ignore */ }
+    };
+    source.addEventListener('done', () => {
+      source.close();
+      resolve();
+    });
+    source.onerror = () => {
+      source.close();
+      resolve();
+    };
+  });
+}
+
+async function sendChat(prompt) {
+  const agent = state.chat.agent;
+  state.chat.busy = true;
+  const send = $('#chat-send');
+  send.disabled = true;
+  send.textContent = '…';
+
+  addBubble('user', prompt);
+  const pre = addBubble('agent', '');
+  const bubble = pre.parentElement;
+  bubble.classList.add('streaming');
+
+  try {
+    const { id } = await api('/api/chat', { agent, prompt });
+    await streamJob(id, (line) => appendBubble(pre, `${line.m}\n`));
+    if (!pre.textContent.trim()) appendBubble(pre, '(no output)');
+  } catch (err) {
+    appendBubble(pre, err.message);
+    bubble.classList.add('failed');
+  } finally {
+    bubble.classList.remove('streaming');
+    state.chat.busy = false;
+    send.disabled = false;
+    send.textContent = 'Send';
+  }
+}
+
+function updateChatHint() {
+  const info = state.tools.find((t) => t.id === state.chat.agent);
+  if (info && !info.installed) {
+    setNote('chat-hint', `${info.label} is not installed yet — install it above, then send.`);
+  } else {
+    setNote('chat-hint', '');
+  }
+}
+
+function selectAgent(btn) {
+  state.chat.agent = btn.dataset.agent;
+  for (const other of $$('#chat-agents .seg')) {
+    const active = other === btn;
+    other.classList.toggle('is-active', active);
+    other.setAttribute('aria-selected', String(active));
+  }
+  $('#chat-input').placeholder = `Ask ${btn.textContent} to explain this repo…`;
+  updateChatHint();
+}
+
+// ---- status ---------------------------------------------------------------
+
 async function refresh() {
   try {
     const status = await api('/api/status');
+    state.tools = status.tools;
     renderTools(status.tools);
+    updateChatHint();
+
     setPortState('desktop', status.running.desktop);
     setPortState('dsh', status.running.dsh);
+    setPortState('opencode', status.running.opencode);
     $('#desktop-link').href = portUrl(6080);
+    toggleLink('dsh', status.running.dsh, 3080, status.dsh && status.dsh.token);
+    toggleLink('opencode', status.running.opencode, 4096);
 
-    const dshLink = $('#dsh-link');
-    if (status.running.dsh) {
-      dshLink.href = portUrl(3080);
-      dshLink.hidden = false;
+    const antigravity = status.tools.find((t) => t.id === 'antigravity-desktop');
+    const agPill = $('#antigravity-state');
+    if (!antigravity || !antigravity.installed) {
+      agPill.className = 'pill pill-idle';
+      agPill.textContent = 'not installed';
+    } else if (agPill.textContent !== 'launched') {
+      agPill.className = 'pill pill-ok';
+      agPill.textContent = 'ready';
+    }
+
+    const password = status.opencode && status.opencode.password;
+    if (status.running.opencode && password) {
+      setPassword(password);
+      $('#opencode-password-row').hidden = false;
     } else {
-      dshLink.hidden = true;
+      $('#opencode-password-row').hidden = true;
     }
   } catch {
     $('#tool-summary').textContent = 'dashboard offline';
@@ -174,51 +420,30 @@ async function runCommand(cmd) {
   }
 }
 
-async function startDsh() {
-  const btn = $('#start-dsh');
-  btn.disabled = true;
-  btn.textContent = 'Starting…';
-  openLog('DeepSeek Harness web UI');
-  appendLine({ s: 'meta', m: 'Starting dsh web on port 3080 (the first run downloads the package)…' });
-
-  try {
-    const result = await api('/api/start-dsh', {});
-    if (result.running) {
-      appendLine({ s: 'meta', m: 'Already running.' });
-      refresh();
-      return;
-    }
-    appendLine({ s: 'meta', m: `Started (pid ${result.pid}). Waiting for the port…` });
-
-    let tries = 0;
-    const timer = setInterval(async () => {
-      tries += 1;
-      try {
-        const ports = await api('/api/ports');
-        if (ports.dsh) {
-          clearInterval(timer);
-          appendLine({ s: 'meta', m: `Ready — ${portUrl(3080)}` });
-          refresh();
-        } else if (tries > 40) {
-          clearInterval(timer);
-          appendLine({ s: 'err', m: 'Port 3080 is still closed. Check /tmp/sanda-dsh-web.log.' });
-        }
-      } catch {
-        /* keep polling */
-      }
-    }, 1500);
-  } catch (err) {
-    appendLine({ s: 'err', m: err.message });
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Start';
-  }
-}
-
 // ---- wiring ---------------------------------------------------------------
 
 $('#refresh').addEventListener('click', refresh);
-$('#start-dsh').addEventListener('click', startDsh);
+$('#start-dsh').addEventListener('click', (event) => startService('dsh', event.currentTarget));
+$('#start-opencode').addEventListener('click', (event) => startService('opencode', event.currentTarget));
+$('#start-antigravity').addEventListener('click', (event) => startAntigravity(event.currentTarget));
+
+$('#opencode-copy').addEventListener('click', async () => {
+  const text = $('#opencode-password').textContent;
+  const btn = $('#opencode-copy');
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✓';
+    setTimeout(() => { btn.textContent = '⧉'; }, 1200);
+  } catch {
+    // Clipboard needs https or localhost; fall back to selecting the text.
+    const range = document.createRange();
+    range.selectNodeContents($('#opencode-password'));
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+});
+
 $('#log-clear').addEventListener('click', () => {
   logEl().textContent = '';
   $('#log-panel').hidden = true;
@@ -230,11 +455,42 @@ $('#exec-form').addEventListener('submit', (event) => {
   if (cmd) runCommand(cmd);
 });
 
-document.querySelectorAll('.chip').forEach((chip) => {
+for (const chip of $$('.chip')) {
   chip.addEventListener('click', () => {
     $('#cmd').value = chip.dataset.cmd;
     runCommand(chip.dataset.cmd);
   });
+}
+
+for (const seg of $$('#chat-agents .seg')) {
+  seg.addEventListener('click', () => selectAgent(seg));
+}
+
+$('#chat-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (state.chat.busy) return;
+  const input = $('#chat-input');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  input.value = '';
+  sendChat(prompt);
+});
+
+// Enter inserts a newline on phones; Ctrl/Cmd+Enter sends from a keyboard.
+$('#chat-input').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    $('#chat-form').requestSubmit();
+  }
+});
+
+$('#chat-reset').addEventListener('click', () => {
+  const log = $('#chat-log');
+  log.textContent = '';
+  const empty = document.createElement('p');
+  empty.className = 'chat-empty';
+  empty.textContent = 'Pick an agent, type a prompt, tap Send.';
+  log.append(empty);
 });
 
 refresh();

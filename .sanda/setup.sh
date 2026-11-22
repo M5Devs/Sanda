@@ -291,7 +291,10 @@ if [ -f "$BASHRC" ] && ! grep -qF '# >>> Sanda >>>' "$BASHRC"; then
   cat >> "$BASHRC" <<'SANDA_BASHRC'
 
 # >>> Sanda >>>
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+
+alias sanda-web='sanda web'
+alias sanda-dashboard='sanda web'
 
 # DeepSeek Harness web UI on forwarded port 3080. In Codespaces the browser
 # reaches the app through a proxy, so tell dsh to trust the forwarded host.

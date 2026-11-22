@@ -7,6 +7,7 @@
 #
 #   sanda                  numbered menu
 #   sanda install dsh pi   install named tools
+#   sanda web              start (or check) the dashboard on port 4040
 #   sanda --all            install every CLI agent
 #   sanda --status         list what is installed
 
@@ -18,7 +19,8 @@ warn() { printf '%s WARN: %s\n' "$TAG" "$*" >&2; }
 
 SANDA_DIR="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 readonly SANDA_DIR
-export PATH="$HOME/.local/bin:$PATH"
+# ~/.opencode/bin is where the OpenCode v2 installer puts its binary.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 
 NPM=(npm)
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -39,6 +41,14 @@ init_npm() {
   return 0
 }
 
+# npm 12 blocks lifecycle scripts unless each package is named. Native deps
+# (node-pty, koffi) need theirs, so ask npm which packages it would block and
+# allow exactly those. The dry run is cheap and never touches the install.
+npm_allow_scripts() {
+  "${NPM[@]}" install -g --dry-run --no-fund --no-audit "$1" 2>&1 |
+    sed -n 's/.*--allow-scripts=\([^ `]*\).*/\1/p' | head -1
+}
+
 npm_agent() {
   local pkg="$1" bin="$2" label="$3"
   if have "$bin"; then
@@ -46,8 +56,21 @@ npm_agent() {
     return 0
   fi
   init_npm || return 1
+
+  local -a extra=()
+  local npm_major list
+  npm_major="$("${NPM[@]}" --version 2>/dev/null | cut -d. -f1)"
+  if [ "${npm_major:-0}" -ge 12 ] 2>/dev/null; then
+    list="$(npm_allow_scripts "$pkg")"
+    case ",$list," in
+      *",$pkg,"*) ;;
+      *) list="${list:+$list,}$pkg" ;;
+    esac
+    extra=(--allow-scripts="$list")
+  fi
+
   log "Installing $label ($pkg)"
-  if "${NPM[@]}" install -g --no-fund --no-audit "$pkg" >/tmp/sanda-npm-install.log 2>&1; then
+  if "${NPM[@]}" install -g "${extra[@]}" --no-fund --no-audit "$pkg" >/tmp/sanda-npm-install.log 2>&1; then
     if have "$bin"; then
       log "$label installed"
       return 0
@@ -60,9 +83,51 @@ npm_agent() {
 }
 
 install_dsh()      { npm_agent "@deepseek-ai/dsh" dsh "DeepSeek Harness"; }
-install_opencode() { npm_agent "opencode-ai" opencode "OpenCode"; }
 install_pi()       { npm_agent "@earendil-works/pi-coding-agent" pi "Pi coding agent"; }
 install_codex()    { npm_agent "@openai/codex" codex "OpenAI Codex CLI"; }
+
+# OpenCode v2 is @opencode/cli (v1 was opencode-ai). npm first; the official
+# installer is the fallback and drops the binary in ~/.opencode/bin.
+install_opencode() {
+  if have opencode; then
+    log "OpenCode is already installed ($(opencode --version 2>/dev/null | head -1))"
+    return 0
+  fi
+
+  if npm_agent "@opencode/cli" opencode "OpenCode v2"; then
+    return 0
+  fi
+
+  log "Trying the official OpenCode v2 installer"
+  local tmp
+  tmp="$(mktemp)"
+  if ! curl -fsSL https://opencode.ai/v2/install -o "$tmp"; then
+    warn "Could not download the OpenCode installer"
+    rm -f "$tmp"
+    return 1
+  fi
+  if head -n 1 "$tmp" | grep -qE '^#!.*sh'; then
+    # --no-modify-path: this repo manages PATH in ~/.bashrc itself.
+    if ! bash "$tmp" --no-modify-path; then
+      warn "OpenCode installer failed"
+      rm -f "$tmp"
+      return 1
+    fi
+  else
+    warn "OpenCode installer was not a shell script; skipping"
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+
+  export PATH="$HOME/.opencode/bin:$PATH"
+  if have opencode; then
+    log "OpenCode v2 installed ($(command -v opencode))"
+    return 0
+  fi
+  warn "opencode was not found after install; open a new shell and try 'opencode'"
+  return 1
+}
 
 install_agy() {
   if have agy; then
@@ -135,12 +200,33 @@ TOOL_IDS=(dsh opencode pi codex agy agy-desktop)
 TOOL_BINS=(dsh opencode pi codex agy antigravity)
 TOOL_LABELS=(
   "DeepSeek Harness      (dsh, web UI on :3080)"
-  "OpenCode              (opencode-ai)"
+  "OpenCode v2           (@opencode/cli, web UI on :4096)"
   "Pi coding agent       (@earendil-works/pi-coding-agent)"
   "OpenAI Codex CLI      (@openai/codex)"
   "Antigravity CLI       (agy)"
   "Antigravity Desktop   (~210 MB download)"
 )
+
+# Start (or check) the dashboard from any shell, including a phone terminal.
+cmd_web() {
+  local starter="$SANDA_DIR/web/start.sh"
+  local port="${SANDA_WEB_PORT:-4040}"
+
+  if [ ! -f "$starter" ]; then
+    warn "web/start.sh is missing from $SANDA_DIR"
+    return 1
+  fi
+
+  bash "$starter"
+
+  if curl -fsS --max-time 2 "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then
+    log "Dashboard: http://localhost:${port}"
+    log "In Codespaces: PORTS tab -> Sanda Dashboard (port ${port})"
+    return 0
+  fi
+  warn "Dashboard is not responding on port ${port} (see ${SANDA_WEB_LOG:-/tmp/sanda-web.log})"
+  return 1
+}
 
 show_menu() {
   local i mark
@@ -151,9 +237,10 @@ show_menu() {
     printf '  %s%d) %s\n' "$mark" "$((i + 1))" "${TOOL_LABELS[$i]}"
   done
   printf '\n  a) install all CLI agents\n'
+  printf '  w) start the dashboard (port 4040)\n'
   printf '  s) show installed tools\n'
   printf '  q) quit\n\n'
-  printf 'Numbers separated by spaces (e.g. 1 3), or a/s/q: '
+  printf 'Numbers separated by spaces (e.g. 1 3), or a/w/s/q: '
 }
 
 show_status() {
@@ -178,10 +265,11 @@ run_picks() {
   for token in "${tokens[@]}"; do
     case "$token" in
       a|A) install_all; log "All CLI agents processed."; return 0 ;;
+      w|W) cmd_web; return 0 ;;
       s|S) show_status; return 0 ;;
       q|Q) exit 0 ;;
       ''|*[!0-9]*)
-        warn "Ignoring '$token' (expected a number, a, s or q)"
+        warn "Ignoring '$token' (expected a number, a, w, s or q)"
         ;;
       *)
         if [ "$token" -ge 1 ] && [ "$token" -le "${#TOOL_IDS[@]}" ]; then
@@ -218,6 +306,7 @@ usage() {
 Usage: sanda [command]
 
   sanda                 numbered menu (no arrow keys needed)
+  sanda web             start (or check) the dashboard on port 4040
   sanda --all           install all CLI agents
   sanda --status        list installed tools
   sanda install <tool>  install named tools
@@ -225,7 +314,7 @@ Usage: sanda [command]
 Tools: dsh, opencode, pi, codex, agy, agy-desktop
 
 Agents are installed on demand so Codespace creation stays fast.
-Prefer a browser? The Sanda dashboard on port 4040 does the same thing.
+The dashboard on port 4040 does the same thing, plus chat and one-tap launch.
 EOF
 }
 
@@ -241,6 +330,9 @@ main() {
     --all|all)
       install_all
       log "All CLI agents processed."
+      ;;
+    web|dashboard)
+      cmd_web
       ;;
     --status|status)
       show_status

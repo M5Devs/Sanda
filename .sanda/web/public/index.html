@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0d12">
 <meta name="color-scheme" content="dark">
-<title>Sanda — Control Center</title>
+<title>Sanda — Workspace Hub</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -15,7 +15,7 @@
     <span class="logo">◈</span>
     <div>
       <h1>Sanda</h1>
-      <p>Cloud Linux Desktop &amp; AI Coding Rig</p>
+      <p>Cloud workspace hub</p>
     </div>
   </div>
   <button id="refresh" class="icon-btn" title="Refresh status" aria-label="Refresh status">⟳</button>
@@ -45,6 +45,7 @@
           <span id="desktop-state" class="pill pill-idle">checking</span>
         </span>
       </a>
+
       <div class="launch-card">
         <span class="launch-icon">⚡</span>
         <span class="launch-body">
@@ -57,7 +58,63 @@
           <button id="start-dsh" class="btn btn-ghost" type="button">Start</button>
         </span>
       </div>
+
+      <div class="launch-card">
+        <span class="launch-icon">🧩</span>
+        <span class="launch-body">
+          <strong>OpenCode Web</strong>
+          <small>v2 · port 4096</small>
+        </span>
+        <span class="launch-actions">
+          <span id="opencode-state" class="pill pill-idle">checking</span>
+          <a id="opencode-link" class="btn btn-ghost" href="#" target="_blank" rel="noopener" hidden>Open</a>
+          <button id="start-opencode" class="btn btn-ghost" type="button">Start</button>
+        </span>
+        <div id="opencode-password-row" class="password-row" hidden>
+          <span class="muted">password</span>
+          <code id="opencode-password"></code>
+          <button id="opencode-copy" class="icon-btn" type="button" title="Copy password" aria-label="Copy password">⧉</button>
+        </div>
+        <p id="opencode-note" class="card-note" hidden></p>
+      </div>
+
+      <div class="launch-card">
+        <span class="launch-icon">🛰️</span>
+        <span class="launch-body">
+          <strong>Antigravity Desktop</strong>
+          <small>launches inside the desktop</small>
+        </span>
+        <span class="launch-actions">
+          <span id="antigravity-state" class="pill pill-idle">checking</span>
+          <button id="start-antigravity" class="btn btn-ghost" type="button">Launch</button>
+        </span>
+        <p id="antigravity-note" class="card-note" hidden></p>
+      </div>
     </div>
+  </section>
+
+  <section class="panel" id="chat-panel">
+    <div class="panel-head">
+      <h2>Mobile agent chat</h2>
+      <button id="chat-reset" class="icon-btn" type="button" title="New chat" aria-label="New chat">⟲</button>
+    </div>
+
+    <div id="chat-agents" class="segmented" role="tablist" aria-label="Agent">
+      <button class="seg is-active" type="button" role="tab" aria-selected="true" data-agent="pi">Pi</button>
+      <button class="seg" type="button" role="tab" aria-selected="false" data-agent="codex">Codex</button>
+    </div>
+
+    <p id="chat-hint" class="card-note" hidden></p>
+
+    <div id="chat-log" class="chat-log" aria-live="polite">
+      <p class="chat-empty">Pick an agent, type a prompt, tap Send. Replies stream in here — no terminal needed.</p>
+    </div>
+
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" rows="3" placeholder="Ask Pi to explain this repo…"
+                aria-label="Prompt" autocomplete="off"></textarea>
+      <button class="btn" id="chat-send" type="submit">Send</button>
+    </form>
   </section>
 
   <section class="panel">
@@ -72,6 +129,7 @@
     </form>
     <div class="chips">
       <button class="chip" data-cmd="sanda --status">sanda --status</button>
+      <button class="chip" data-cmd="sanda web">sanda web</button>
       <button class="chip" data-cmd="ls -la">ls -la</button>
       <button class="chip" data-cmd="git status">git status</button>
       <button class="chip" data-cmd="df -h">df -h</button>

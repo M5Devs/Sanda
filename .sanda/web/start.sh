@@ -1,50 +1,100 @@
 #!/usr/bin/env bash
-# Start the Sanda dashboard on port 4040 (idempotent — safe to run on every
-# container start; it exits early when a healthy instance is already up).
+# Start the Sanda dashboard on port 4040.
+#
+# Safe to run repeatedly: postStartCommand and `sanda web` both call it. It
+# finds node without a login shell, detaches the server with setsid so
+# Codespaces does not reap it when the hook exits, and waits until
+# /api/health answers before reporting success.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${SANDA_WEB_PORT:-4040}"
 LOG="${SANDA_WEB_LOG:-/tmp/sanda-web.log}"
+WAIT_SECONDS="${SANDA_WEB_WAIT:-15}"
+
+log()  { printf '[sanda] %s\n' "$*"; }
+warn() { printf '[sanda] %s\n' "$*" >&2; }
 
 healthy() {
   curl -fsS --max-time 1 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1
+}
+
+# postStartCommand runs in a non-login shell where nvm's node is not on PATH.
+load_node_path() {
+  export NVM_DIR="${NVM_DIR:-/usr/local/share/nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+  fi
+
+  local dir
+  for dir in "$NVM_DIR/current/bin" \
+             /usr/local/share/nvm/current/bin \
+             /usr/local/share/nvm/versions/node/*/bin \
+             /usr/local/bin \
+             /usr/bin; do
+    [ -d "$dir" ] || continue
+    case ":$PATH:" in
+      *":$dir:"*) ;;
+      *) PATH="$dir:$PATH" ;;
+    esac
+  done
+  export PATH
+}
+
+wait_healthy() {
+  local i
+  for ((i = 0; i < WAIT_SECONDS * 4; i++)); do
+    healthy && return 0
+    # After a second, a missing process means it already crashed (bad port,
+    # missing module); stop waiting instead of burning the full timeout.
+    if [ "$i" -ge 4 ] && ! pgrep -f "node .*sanda/web/server\.js" >/dev/null 2>&1; then
+      return 1
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+print_log() {
+  [ -s "$LOG" ] || return 0
+  warn "last lines of $LOG:"
+  tail -n 20 "$LOG" >&2
 }
 
 if healthy; then
   exit 0
 fi
 
-export NVM_DIR="${NVM_DIR:-/usr/local/share/nvm}"
-if [ -s "$NVM_DIR/nvm.sh" ]; then
-  # shellcheck disable=SC1091
-  . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
-fi
-export PATH="$HOME/.local/bin:$NVM_DIR/current/bin:$PATH"
+load_node_path
 
-# Another instance may still be booting; give it a moment before spawning.
-if pgrep -f "node .*sanda/web/server\.js" >/dev/null 2>&1; then
-  for _ in $(seq 1 30); do
-    healthy && exit 0
-    sleep 0.2
-  done
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+if [ -z "$NODE_BIN" ]; then
+  warn "node not found (checked PATH and nvm). The Node devcontainer feature provides it; rebuild the container."
+  exit 1
 fi
 
-if ! command -v node >/dev/null 2>&1; then
-  printf '[sanda] node not found; dashboard not started\n' >&2
+# A previous instance may still be booting; do not start a second one.
+if pgrep -f "node .*sanda/web/server\.js" >/dev/null 2>&1 && wait_healthy; then
+  log "dashboard already running on port $PORT"
   exit 0
 fi
 
-nohup node "$SCRIPT_DIR/server.js" >>"$LOG" 2>&1 &
+STARTED_AT=$SECONDS
 
-for _ in $(seq 1 40); do
-  if healthy; then
-    printf '[sanda] dashboard on http://127.0.0.1:%s\n' "$PORT"
-    exit 0
-  fi
-  sleep 0.25
-done
+# setsid gives the server its own session, so it outlives this shell.
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$NODE_BIN" "$SCRIPT_DIR/server.js" </dev/null >"$LOG" 2>&1 &
+else
+  nohup "$NODE_BIN" "$SCRIPT_DIR/server.js" </dev/null >"$LOG" 2>&1 &
+fi
 
-printf '[sanda] dashboard did not start; see %s\n' "$LOG" >&2
-exit 0
+if wait_healthy; then
+  log "dashboard on http://127.0.0.1:${PORT} (log: ${LOG})"
+  exit 0
+fi
+
+warn "dashboard did not answer on port ${PORT} after $((SECONDS - STARTED_AT))s"
+print_log
+exit 1
