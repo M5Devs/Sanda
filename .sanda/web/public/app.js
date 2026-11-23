@@ -520,12 +520,16 @@ async function refresh() {
 
     setPortState('desktop', status.running.desktop);
     $('#desktop-link').href = portUrl(6080);
-    toggleLink('dsh', status.running.dsh, 3080, status.dsh && status.dsh.token);
+    // The 3080 proxy signs the browser in itself; no token in the link.
+    toggleLink('dsh', status.running.dsh, 3080);
     toggleLink('opencode', status.running.opencode, 4096);
 
     const antigravity = status.tools.find((t) => t.id === 'antigravity-desktop');
+    const agy = status.tools.find((t) => t.id === 'agy');
     const agPill = $('#antigravity-state');
     const agRunning = Boolean(status.running.antigravity);
+    // One Google sign-in covers both the CLI and the desktop app.
+    $('#agy-signin').hidden = !(agy && agy.installed);
     if (!antigravity || !antigravity.installed) {
       agPill.className = 'pill pill-idle';
       agPill.textContent = 'not installed';
@@ -556,7 +560,7 @@ async function refresh() {
       if (status.running.dsh) {
         setNote(
           'dsh-note',
-          'Running, but the hub found no token in /tmp/sanda-dsh-web.log. Restart it here, or open the URL dsh printed in your terminal.'
+          'dsh is running but has not printed its token yet, so the auto sign-in on port 3080 cannot work. Restart it here.'
         );
       }
     }
@@ -591,6 +595,58 @@ for (const id of ['dsh', 'opencode']) {
   $(`#${id}-stop`).addEventListener('click', () => stopService(id));
   $(`#${id}-restart`).addEventListener('click', () => restartService(id));
 }
+$('#agy-signin').addEventListener('click', async () => {
+  const panel = $('#agy-auth');
+  const button = $('#agy-signin');
+  button.disabled = true;
+  button.textContent = 'Starting…';
+  setNote('agy-auth-status', 'Asking agy for a Google sign-in link…');
+  try {
+    const result = await api('/api/antigravity/auth-start', {});
+    if (!result.ok) {
+      setNote('agy-auth-status', result.error);
+      panel.hidden = true;
+      return;
+    }
+    $('#agy-auth-url').href = result.url;
+    $('#agy-auth-host').textContent = 'accounts.google.com · code is valid for a few minutes';
+    panel.hidden = false;
+    setNote('agy-auth-status', 'Open the link, sign in, then paste the code below.');
+  } catch (err) {
+    setNote('agy-auth-status', err.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Sign in with Google';
+  }
+});
+
+$('#agy-auth-submit').addEventListener('click', async () => {
+  const input = $('#agy-auth-code');
+  const code = input.value.trim();
+  if (!code) {
+    setNote('agy-auth-status', 'Paste the code Google showed you first.');
+    return;
+  }
+  const button = $('#agy-auth-submit');
+  button.disabled = true;
+  setNote('agy-auth-status', 'Checking the code with Google…');
+  try {
+    const result = await api('/api/antigravity/auth-code', { code });
+    if (result.ok) {
+      input.value = '';
+      $('#agy-auth').hidden = true;
+      setNote('agy-auth-status', '');
+      setNote('antigravity-note', result.message);
+    } else {
+      setNote('agy-auth-status', `${result.error} — tap Sign in with Google to get a fresh link.`);
+    }
+  } catch (err) {
+    setNote('agy-auth-status', err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 $('#start-antigravity').addEventListener('click', startAntigravity);
 $('#antigravity-stop').addEventListener('click', () => stopService('antigravity'));
 $('#antigravity-restart').addEventListener('click', () => restartService('antigravity'));

@@ -25,6 +25,7 @@ log "Updating apt package lists"
 log "Installing base tools: tmux htop jq ffmpeg ..."
 "${SUDO[@]}" apt-get install -y -qq --no-install-recommends \
   tmux htop jq ffmpeg curl ca-certificates unzip xdg-utils \
+  gnome-keyring dbus-x11 libsecret-1-0 \
   || warn "Some base tools could not be installed"
 
 browser_works() {
@@ -247,6 +248,21 @@ configure_desktop() {
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+
+# A session bus and an unlocked Secret Service: agy and Antigravity Desktop
+# keep their Google token in the keyring, so a sign-in survives a restart.
+# `--unlock` reads the password from stdin; the login password is empty here,
+# which is what an unattended container can offer.
+if command -v dbus-launch >/dev/null 2>&1; then
+  eval "$(dbus-launch --sh-syntax)"
+  export DBUS_SESSION_BUS_ADDRESS
+fi
+if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+  eval "$(gnome-keyring-daemon --start --components=secrets 2>/dev/null)" || true
+  printf '' | gnome-keyring-daemon --unlock >/dev/null 2>&1 || true
+  export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK
+fi
+
 exec startxfce4
 EOF
     chmod +x "$HOME/.vnc/xstartup"
@@ -299,14 +315,14 @@ alias sanda-dashboard='sanda web'
 # DeepSeek Harness web UI on forwarded port 3080. In Codespaces the browser
 # reaches the app through a proxy, so tell dsh to trust the forwarded host.
 dsh-web() {
+  # dsh listens on loopback 3081; the proxy on 3080 signs the browser in with
+  # the token dsh prints, so opening port 3080 needs no token at all.
   local extra=()
   if [ -n "${CODESPACE_NAME:-}" ] && [ -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]; then
-    extra+=(--trusted-host "${CODESPACE_NAME}-3080.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}")
+    extra+=(SANDA_DSH_TRUSTED_HOST="${CODESPACE_NAME}-3080.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}")
   fi
-  # Tee the banner: the dashboard reads the ?token= it prints, so a dsh started
-  # here still gets a working Open link on port 4040.
-  npx -y @deepseek-ai/dsh web --port 3080 --no-open "${extra[@]}" 2>&1 \
-    | tee -a /tmp/sanda-dsh-web.log
+  env "${extra[@]}" SANDA_REPO_DIR="@SCRIPT_DIR@/.." \
+    node "@SCRIPT_DIR@/web/dsh-proxy.js"
 }
 
 alias dsh-tui='npx -y @deepseek-ai/dsh tui'

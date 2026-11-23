@@ -115,7 +115,7 @@ The hub is a zero-dependency Node server (`.sanda/web/server.js`) that starts au
 | **Linux Desktop** (`6080`) | Opens noVNC in a new tab |
 | **DeepSeek Harness** (`3080`) | **Start** runs `dsh-web` in the background, then **Open**, **Stop** and **Restart** appear |
 | **OpenCode Web** (`4096`) | **Start** runs `opencode serve`, then shows the login **password** with a copy button |
-| **Antigravity Desktop** | **Launch** starts the GUI app on the desktop display (`:1`); **Stop** closes it |
+| **Antigravity Desktop** | **Launch** starts the GUI app on the desktop display (`:1`); **Stop** closes it; **Sign in with Google** authenticates it and `agy` from your phone |
 
 **Stop** and **Restart** appear on a card as soon as its service is running.
 Each service the hub starts records its pid in `/tmp/sanda-<service>.pid`, so
@@ -150,6 +150,8 @@ not a Codespace rebuild.
 | `POST /api/start-dsh` | start the DeepSeek web UI on `3080` |
 | `POST /api/start-opencode` | start `opencode serve` on `4096` |
 | `POST /api/start-antigravity` | launch the Antigravity desktop app |
+| `POST /api/antigravity/auth-start` | start a Google sign-in; returns the OAuth URL |
+| `POST /api/antigravity/auth-code` | submit the code Google showed |
 | `POST /api/stop-<service>` | stop a service the hub started (`dsh`, `opencode`, `antigravity`) |
 | `GET /api/health` | liveness probe used by the launcher |
 
@@ -230,11 +232,20 @@ Tap **Start** on the hub, or run:
 dsh-web
 ```
 
-This starts the web UI on port `3080` and prints a URL. Open the **PORTS** tab, tap the globe icon next to **DeepSeek Harness Web UI**, and the UI opens in your phone browser. Keep the terminal running while you use it. The helper automatically trusts the Codespaces proxy host, so the UI works behind GitHub's forwarded URL.
+This starts the web UI on port `3080`. Open the **PORTS** tab, tap the globe icon next to **DeepSeek Harness Web UI**, and the UI opens in your phone browser — **no token to copy or paste**. Keep the terminal running while you use it.
 
-The first request needs the token from that URL (`?token=…`); the hub's **Open** button appends it for you, and the card shows the token with a **copy** button in case Codespaces drops the query on its first-visit redirect. Opening the port by hand? Copy the full URL from `/tmp/sanda-dsh-web.log`.
+`dsh` has no `--no-auth` flag: it mints a random token per process and answers `401` to any request without it, which broke every visit whose `?token=` was lost in Codespaces' first-visit redirect. So Sanda puts a small reverse proxy on the public port:
 
-`dsh` mints a random token per process and offers no `--no-auth` or fixed `--token` flag, so the token is the only way in. The hub reads it from the log (after stripping colour escapes), checks it against the running server before showing it, and hides a stale one instead of offering a dead link. A successful visit sets a 30-day `dsh-auth-*` cookie, so later visits work without the token.
+```
+phone ──▶ :3080 proxy (dsh-proxy.js) ──▶ 127.0.0.1:3081 dsh web
+              │
+              └─ reads dsh's token from its log, exchanges it for the
+                 dsh-auth-* cookie, and hands that cookie to your browser
+```
+
+The proxy reads the token dsh prints, fetches `/?token=…` with your browser's own `Host`, and returns the resulting session cookie — so the first request is a plain `200` with a working cookie, and a stale cookie gets refreshed with a `302` instead of an error page. WebSocket upgrades are piped through too. `dsh` itself only listens on loopback (`127.0.0.1:3081`), so the token never reaches the network.
+
+The **fallback token** on the card is there only for debugging: you do not need it, and the **Open** button no longer carries it in the URL.
 
 ### OpenCode Web (port 4096)
 
@@ -298,6 +309,18 @@ sanda install agy-desktop
 
 It downloads the official Antigravity build for your architecture, installs it under `~/.local/opt/antigravity`, and adds it to the desktop menu. Launch it from the menu or run `antigravity --no-sandbox` in a desktop terminal.
 
+#### Signing in with Google from your phone
+
+Antigravity and `agy` share one Google session, and neither has a password field you would want to use on a phone keyboard. So the hub runs the sign-in for you:
+
+1. Tap **Sign in with Google** on the Antigravity Desktop card.
+2. Tap **Open Google sign-in** — the real `accounts.google.com` link opens in your phone's browser, already signed in.
+3. Google shows a code. Paste it into the box and tap **Submit**.
+
+That authenticates the **CLI and the desktop app together**. The hub drives `agy` behind the scenes: it runs it on a pseudo-terminal, picks *Google OAuth*, extracts the OAuth URL (the TUI wraps it, so the hub unwraps it), and pipes your pasted code back to the waiting process. Codes are single-use — if one is rejected, tap **Sign in with Google** again for a fresh link.
+
+The sign-in is stored in the **GNOME keyring** (`gnome-keyring` + `dbus-x11`, started by the desktop session), so it survives Codespaces restarts instead of being forgotten with the container's temporary home.
+
 ---
 
 ## Stop the Codespace when you finish
@@ -322,7 +345,8 @@ Your files, secrets, and installed agents are kept. Starting it again takes seco
 | `sanda: command not found` | The base setup did not finish. Run `bash .sanda/setup.sh`. |
 | `pi: command not found` | Agents are on demand. Install it from the hub or `sanda`. |
 | Port `3080` shows nothing | Tap **Start** on the hub, or run `dsh-web`; check `/tmp/sanda-dsh-web.log`. |
-| `dsh web authentication required; reopen the URL printed by dsh web` | The request arrived without the token or the `dsh-auth-*` cookie. Tap **Open** on the DeepSeek Harness card (it appends `?token=…`), or copy the token from the card into the URL. If the card shows no token, **Restart** dsh from the card so the hub can read the fresh one. |
+| `dsh web authentication required; reopen the URL printed by dsh web` | You reached `dsh` directly on `127.0.0.1:3081` instead of through the proxy on `3080`. Open port `3080` (the hub's **Open** button) — the proxy signs you in. |
+| Port `3080` says "dsh is starting up" | The proxy is up but `dsh` has not printed its token yet. Reload in a few seconds; if it persists, **Restart** on the card and check `/tmp/sanda-dsh-web.log`. |
 | Port `4096` shows nothing | Tap **Start** on the OpenCode card; check `/tmp/sanda-opencode.log`. |
 | OpenCode asks for a password | Read it from the OpenCode card (copy button) or `grep -i password /tmp/sanda-opencode.log`. |
 | Chat says "not installed yet" | Install that agent in **AI coding tools** first. |
@@ -332,6 +356,8 @@ Your files, secrets, and installed agents are kept. Starting it again takes seco
 | Desktop is black or frozen | Reload the noVNC tab, then restart the session: `sudo pkill -f Xtigervnc` (the desktop restarts itself). |
 | Desktop icons are missing | Run `bash .sanda/setup.sh` again, then restart the desktop. |
 | Antigravity desktop won't start | Run `antigravity --no-sandbox` in a desktop terminal (Electron sandbox limitation in containers). |
+| Google sign-in says `invalid_grant` | The code expired or was already used. Tap **Sign in with Google** for a fresh link and paste the new code within a few minutes. |
+| `agy` asks you to sign in again after a restart | The keyring was not running. Open the desktop once (it starts `gnome-keyring`), or run `agy` and sign in again — the hub card works without a desktop session. |
 | Build is slow or runs out of memory | Use a 4-core machine. Agents are not part of the build, so install only what you need. |
 | Secret is missing in the shell | Secrets load at Codespace start. Stop and start the Codespace after adding one. |
 

@@ -60,7 +60,7 @@
           <button id="start-dsh" class="btn btn-ghost" type="button">Start</button>
         </span>
         <div id="dsh-token-row" class="password-row" hidden>
-          <span class="muted">sign-in token</span>
+          <span class="muted">fallback token</span>
           <code id="dsh-token"></code>
           <button id="dsh-copy" class="icon-btn" type="button" title="Copy token" aria-label="Copy token">⧉</button>
         </div>
@@ -100,6 +100,20 @@
           <button id="antigravity-restart" class="btn btn-ghost" type="button" hidden>Restart</button>
           <button id="start-antigravity" class="btn btn-ghost" type="button">Launch</button>
         </span>
+        <button id="agy-signin" class="btn btn-ghost agy-signin" type="button">Sign in with Google</button>
+        <div id="agy-auth" class="auth-panel" hidden>
+          <a id="agy-auth-url" class="btn agy-auth-link" href="#" target="_blank" rel="noopener">
+            Open Google sign-in
+          </a>
+          <small id="agy-auth-host" class="muted"></small>
+          <div class="auth-code-row">
+            <input id="agy-auth-code" class="auth-code" type="text" inputmode="text"
+              autocomplete="one-time-code" autocapitalize="off" spellcheck="false"
+              placeholder="Paste the code Google shows" />
+            <button id="agy-auth-submit" class="btn" type="button">Submit</button>
+          </div>
+          <p id="agy-auth-status" class="card-note" hidden></p>
+        </div>
         <p id="antigravity-note" class="card-note" hidden></p>
       </div>
     </div>

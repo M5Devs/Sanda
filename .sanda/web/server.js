@@ -13,6 +13,8 @@
 //   POST /api/start-dsh                  DeepSeek Harness web UI (3080)
 //   POST /api/start-opencode             OpenCode v2 `serve` / v1 `web` (4096)
 //   POST /api/start-antigravity          Antigravity Desktop inside XFCE (6080)
+//   POST /api/antigravity/auth-start     Google sign-in: returns the OAuth URL
+//   POST /api/antigravity/auth-code      Google sign-in: submit the pasted code
 //   POST /api/stop-<service>             stop a service the hub started
 //   GET  /api/jobs/:id/events            SSE stream of a job's output
 //
@@ -41,7 +43,8 @@ function sandaCommand() {
   return { bin: 'sanda', args: [] };
 }
 
-const DSH_PORT = 3080;
+const DSH_PORT = 3080; // public: the auto-auth proxy from dsh-proxy.js
+const DSH_INTERNAL_PORT = 3081; // dsh itself, loopback only
 const DESKTOP_PORT = 6080;
 const OPENCODE_PORT = 4096;
 
@@ -218,7 +221,7 @@ function detectDisplay() {
 // dsh and opencode colourise their banner when they think a terminal is
 // attached, and a colour reset can land inside a token (`token=AB\e[0mCD`).
 // Strip the escapes before parsing or the captured value is truncated.
-const ANSI = /\u001b\[[0-9;?]*[A-Za-z]|\u001b\][^\u0007]*\u0007/g;
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]|\u001b\][^\u0007]*\u0007|\u001b[@-Z\\-_]/g;
 
 function stripAnsi(text) {
   return text.replace(ANSI, '').replace(/\r/g, '');
@@ -273,7 +276,7 @@ async function verifiedDshToken() {
   for (const token of tokens) {
     try {
       const res = await fetch(
-        `http://127.0.0.1:${DSH_PORT}/?token=${encodeURIComponent(token)}`,
+        `http://127.0.0.1:${DSH_INTERNAL_PORT}/?token=${encodeURIComponent(token)}`,
         { redirect: 'manual' }
       );
       await res.text();
@@ -751,22 +754,52 @@ async function waitForPort(port, timeoutMs) {
 
 // The spawn lock has to live until the port answers: releasing it right after
 // spawn() lets a double-tap start a second instance before the first binds.
+// dsh runs on a loopback port behind dsh-proxy.js, which owns the public 3080
+// and signs the browser in with the token dsh prints. dsh answers 401 to any
+// request without that token, so a direct port would strand mobile users whose
+// first visit lost the ?token= query.
 async function startDshWeb() {
-  const args = ['web', '--port', String(DSH_PORT), '--no-open'];
-  const trusted = forwardOrigin(DSH_PORT);
-  if (trusted) args.push('--trusted-host', trusted.replace('https://', ''));
-
   // Prefer an installed `dsh`; npx would download it again into its cache.
   const dsh = which('dsh');
-  const cmd = dsh || which('npx');
-  if (!cmd) return { started: false, error: 'dsh is not installed and npx is missing' };
+  const npx = dsh ? null : which('npx');
+  if (!dsh && !npx) return { started: false, error: 'dsh is not installed and npx is missing' };
 
-  const argv = dsh ? args : ['-y', '@deepseek-ai/dsh', ...args];
-  const pid = spawnDetached(cmd, argv, DSH_LOG);
+  const node = which('node') || process.execPath;
+  const trusted = forwardOrigin(DSH_PORT);
+  const env = {
+    ...process.env,
+    SANDA_DSH_PORT: String(DSH_PORT),
+    SANDA_DSH_TARGET_PORT: String(DSH_INTERNAL_PORT),
+    SANDA_DSH_LOG: DSH_LOG,
+    SANDA_REPO_DIR: REPO_DIR,
+    ...(dsh ? { SANDA_DSH_BIN: dsh } : { SANDA_DSH_NPX: '1' }),
+    ...(trusted ? { SANDA_DSH_TRUSTED_HOST: trusted.replace('https://', '') } : {}),
+  };
+  const pid = spawnDetached(node, [path.join(__dirname, 'dsh-proxy.js')], DSH_LOG, env);
   writePid('dsh', pid);
+
   const ready = await waitForPort(DSH_PORT, 25000);
-  const token = ready ? await waitForDshToken(8000) : null;
-  return { started: true, ready, pid, port: DSH_PORT, token };
+  const target = ready ? await waitForProxyTarget(15000) : false;
+  const token = target ? await waitForDshToken(8000) : null;
+  return { started: true, ready: target, pid, port: DSH_PORT, token };
+}
+
+// The proxy answers before dsh has finished booting; wait for its target flag.
+async function waitForProxyTarget(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${DSH_PORT}/__sanda_proxy`, {
+        headers: { accept: 'application/json' },
+      });
+      const body = await res.json();
+      if (body && body.up) return true;
+    } catch {
+      /* proxy still starting */
+    }
+    if (Date.now() >= deadline) return false;
+    await sleep(250);
+  }
 }
 
 // OpenCode v2 is `opencode serve` (v2 API + web server); v1 used
@@ -791,6 +824,169 @@ async function startOpencode() {
   writePid('opencode', pid);
   const ready = await waitForPort(OPENCODE_PORT, 25000);
   return { started: true, ready, pid, port: OPENCODE_PORT, mode: subcommand };
+}
+
+// ---- Antigravity Google sign-in -------------------------------------------
+//
+// `agy` has no `auth login` subcommand: running it with no arguments on a
+// terminal prints the Google OAuth URL and then reads the authorization code
+// from stdin. It needs a pty for that, so it runs under `script(1)`; the URL is
+// extracted for the phone's browser and the pasted code is written back. One
+// sign-in covers both `agy` and Antigravity Desktop (same keyring entry).
+
+const AGY_AUTH_IDLE_MS = 5 * 60 * 1000;
+let agyAuth = null;
+
+function agyBin() {
+  return which('agy', [path.join(os.homedir(), '.local/bin/agy')]);
+}
+
+function killAgyAuth() {
+  if (!agyAuth) return;
+  try {
+    agyAuth.child.kill('SIGKILL');
+  } catch {
+    /* already gone */
+  }
+  clearTimeout(agyAuth.timer);
+  agyAuth = null;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+// The TUI wraps the URL to the terminal width and frames it with rule lines.
+function extractAuthUrl(text) {
+  const lines = stripAnsi(text).split(/\r?\n/);
+  const start = lines.findIndex((line) => /Open (the URL below|this link)/i.test(line));
+  const body = [];
+  for (let i = start + 1; start !== -1 && i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (/^[\u2500\u2501=_-]{10,}$/.test(line)) {
+      if (body.length) break;
+      continue;
+    }
+    if (/After authenticating|paste it below|authorization code/i.test(line)) break;
+    if (line) body.push(line);
+  }
+  const joined = body.join('');
+  return /^https:\/\/accounts\.google\.com\//.test(joined) ? joined : null;
+}
+
+function waitForAgy(pattern, timeoutMs) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      if (!agyAuth) return resolve({ ok: false, error: 'sign-in was cancelled' });
+      if (pattern.test(stripAnsi(agyAuth.buffer))) return resolve({ ok: true });
+      if (Date.now() - started > timeoutMs) return resolve({ ok: false, error: 'timed out' });
+      setTimeout(tick, 200);
+    };
+    tick();
+  });
+}
+
+async function antigravityAuthStart() {
+  const bin = agyBin();
+  if (!bin) return { ok: false, error: 'agy is not installed yet', install: 'agy' };
+  const script = which('script');
+  if (!script) return { ok: false, error: 'script(1) is missing; install util-linux' };
+
+  killAgyAuth();
+  const child = spawn(script, ['-qefc', `exec ${shellQuote(bin)}`, '/dev/null'], {
+    cwd: REPO_DIR,
+    env: {
+      ...process.env,
+      // No browser here: agy must print the URL for the phone instead of
+      // trying to open one on the (headless) desktop.
+      DISPLAY: '',
+      SSH_CONNECTION: '1 2 3 4',
+      BROWSER: '/bin/true',
+      COLUMNS: '500',
+      TERM: 'xterm-256color',
+      NO_COLOR: '1',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  agyAuth = { child, buffer: '', url: null, startedAt: Date.now(), timer: null };
+  const collect = (chunk) => {
+    if (!agyAuth) return;
+    agyAuth.buffer = (agyAuth.buffer + chunk.toString('utf8')).slice(-64000);
+    // The login-method menu needs one Enter to pick "1. Google OAuth".
+    if (!agyAuth.picked && /Select login method/i.test(stripAnsi(agyAuth.buffer))) {
+      agyAuth.picked = true;
+      try {
+        child.stdin.write('\r');
+      } catch {
+        /* child already gone */
+      }
+    }
+  };
+  child.stdout.on('data', collect);
+  child.stderr.on('data', collect);
+  child.on('exit', () => {
+    if (agyAuth && agyAuth.child === child) {
+      clearTimeout(agyAuth.timer);
+      agyAuth = null;
+    }
+  });
+
+  agyAuth.timer = setTimeout(killAgyAuth, AGY_AUTH_IDLE_MS);
+
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    const url = extractAuthUrl(agyAuth ? agyAuth.buffer : '');
+    if (url) {
+      agyAuth.url = url;
+      return { ok: true, url, startedAt: agyAuth.startedAt };
+    }
+    if (!agyAuth) return { ok: false, error: 'agy exited before printing a URL' };
+    if (Date.now() > deadline) {
+      killAgyAuth();
+      return { ok: false, error: 'agy did not print a sign-in URL in time' };
+    }
+    await sleep(300);
+  }
+}
+
+async function antigravityAuthCode(code) {
+  if (!agyAuth) return { ok: false, error: 'start the sign-in first' };
+  if (!/^[A-Za-z0-9._/~+=-]{8,}$/.test(code)) {
+    return { ok: false, error: 'that does not look like an authorization code' };
+  }
+
+  agyAuth.buffer = '';
+  try {
+    agyAuth.child.stdin.write(`${code}\r`);
+  } catch {
+    killAgyAuth();
+    return { ok: false, error: 'agy stopped listening; start the sign-in again' };
+  }
+
+  const done = await waitForAgy(/Authentication successful!|Got an error:|Couldn't sign in/i, 45000);
+  const text = stripAnsi(agyAuth ? agyAuth.buffer : '');
+  if (!done.ok) {
+    killAgyAuth();
+    return { ok: false, error: `no answer from agy (${done.error})` };
+  }
+  if (/Authentication successful!/i.test(text)) {
+    // Give agy a moment to persist the token, then end the TUI.
+    await sleep(1500);
+    killAgyAuth();
+    return { ok: true, message: 'Signed in. agy and Antigravity Desktop now share this session.' };
+  }
+  const reported = text.match(/Got an error:\s*(.+)/i);
+  const failure = reported
+    ? reported[1].trim()
+    : text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => /error|invalid|denied|expired|failed/i.test(line))
+        .pop();
+  killAgyAuth();
+  return { ok: false, error: failure || 'Google rejected that code' };
 }
 
 async function startAntigravity() {
@@ -1119,6 +1315,17 @@ async function handle(req, res) {
     }
     const result = await startOnce('opencode', async () => startOpencode());
     return json(res, result.started ? 202 : 400, result);
+  }
+
+  if (req.method === 'POST' && route === '/api/antigravity/auth-start') {
+    return json(res, 200, await antigravityAuthStart());
+  }
+
+  if (req.method === 'POST' && route === '/api/antigravity/auth-code') {
+    const body = await readJson(req);
+    const code = String((body && body.code) || '').trim();
+    if (!code) return json(res, 400, { ok: false, error: 'paste the code from Google' });
+    return json(res, 200, await antigravityAuthCode(code));
   }
 
   if (req.method === 'POST' && route === '/api/start-antigravity') {

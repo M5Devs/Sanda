@@ -235,6 +235,55 @@ main { padding: 16px; display: grid; gap: 16px; max-width: 860px; margin: 0 auto
 
 .password-row .icon-btn { grid-row: 1; grid-column: 2; justify-self: end; }
 
+/* Antigravity Google sign-in: the OAuth URL is opened from the phone, the code
+   comes back here. Full-width controls so the row never overflows at 390px. */
+.agy-signin {
+  flex: 1 1 100%;
+  margin-top: 2px;
+}
+
+.auth-panel {
+  flex: 1 1 100%;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: #0f131b;
+}
+
+.auth-panel .agy-auth-link {
+  justify-content: center;
+  text-align: center;
+  white-space: normal;
+}
+
+.auth-panel .muted {
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.auth-code-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.auth-code {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0b0e14;
+  color: var(--text);
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.auth-code:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* ---- chat ---------------------------------------------------------------- */
 
 .segmented {
